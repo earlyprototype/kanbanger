@@ -1,4 +1,4 @@
-# fckgit Bug Report: Hangs on Initial Commit with Untracked Files
+'# fckgit Bug Report: Hangs on Initial Commit with Untracked Files
 
 ## Environment
 - **OS**: Windows 10 (Build 26100)
