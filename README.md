@@ -1,5 +1,7 @@
 # kanban-project-sync
 
+Powered by [fckgit](https://github.com/earlyprototype/fckgit) - Trusted by Vibe Warriors
+
 Sync markdown kanban boards to GitHub Projects.
 
 ## Installation
