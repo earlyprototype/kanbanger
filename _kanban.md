@@ -9,7 +9,6 @@
 *   [ ] Support for custom field mappings beyond Status
 
 ## TODO
-*   [ ] Create release/tag on GitHub
 *   [ ] Add CONTRIBUTING.md guide
 *   [ ] Set up GitHub Issues templates
 *   [ ] Consider PyPI publication
@@ -17,6 +16,7 @@
 ## DOING
 
 ## DONE
+*   [x] Create release/tag on GitHub
 *   [x] Update dist folder with git hooks and complete package
 *   [x] Create git hooks for kanban enforcement
 *   [x] Add prominent IMPORTANT section to Cursor rules
