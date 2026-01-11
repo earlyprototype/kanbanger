@@ -17,6 +17,7 @@
 ## DOING
 
 ## DONE
+*   [x] Update dist folder with git hooks and complete package
 *   [x] Create git hooks for kanban enforcement
 *   [x] Add prominent IMPORTANT section to Cursor rules
 *   [x] Define explicit triggers for adding/moving tasks in Cursor rules
