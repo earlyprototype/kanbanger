@@ -33,7 +33,8 @@ env/
 
 # Kanban state files (local only)
 .kanban.json
-_kanban.md
+
+# Note: _kanban.md is NOT ignored - commit it to track task history!
 
 # Environment files with secrets
 .env
