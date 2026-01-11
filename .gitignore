@@ -48,11 +48,7 @@ LLM_WORKFLOW.md
 SPEC_INTEGRATION.md
 spec_engine_integration.py
 
-# Distribution packages (for other projects)
-kanbanger-dist/
-kanbanger-spec-integration/
-*.tar.gz
-create_spec_integration_package.sh
+# Note: kanbanger-dist/ is now tracked as the official distribution package
 
 # Project-specific files
 TESTING.md

@@ -1,0 +1,325 @@
+# Kanbanger Task Management Rules
+
+## IMPORTANT: EVERY PLAN MUST REFERENCE _kanban.md
+
+**CRITICAL INSTRUCTION:** When creating ANY plan, you MUST:
+1. Check current state of `_kanban.md` 
+2. Reference which tasks from `_kanban.md` will be worked on
+3. Include steps to update `_kanban.md` during execution
+4. Include reminder to sync at end: `kanban-sync _kanban.md`
+
+**Never create a plan without explicitly mentioning `_kanban.md` multiple times.**
+
+---
+
+## MANDATORY: All work must be tracked in _kanban.md
+
+### Before Starting ANY Task
+
+1. **Check _kanban.md exists**
+   - If not: Create it immediately
+   - Use: `cp example_kanban.md _kanban.md` or generate from SPEC
+
+2. **Verify task is tracked**
+   - Check if task exists in TODO or DOING section
+   - If not: STOP and prompt user to add it
+   - Never proceed with untracked work
+
+3. **Move task to DOING**
+   - When starting work, move task from TODO to DOING
+   - Keep DOING limited to 1-3 tasks (prevent multitasking)
+
+---
+
+## WHEN TO ADD NEW TASKS (Proactive Detection)
+
+### Add to BACKLOG when:
+- User mentions "maybe we could..." or "in the future..."
+- You discover technical debt during code review
+- You identify optimization opportunities
+- Dependencies or prerequisites are discovered
+- Nice-to-have features are mentioned
+- User says "not now, but later"
+
+### Add to TODO when:
+- User says "we need to..." or "we should..."
+- You find bugs or issues that need fixing
+- Required refactoring is identified
+- Documentation needs writing
+- Tests need to be added
+- User explicitly requests a task
+- Work blocks current progress
+- Follow-up tasks emerge from completed work
+
+### Add to DOING when:
+- User says "let's do this now" or "start working on..."
+- Immediately moving a task from TODO
+- NEVER add directly to DOING without user confirmation
+
+### Add to DONE when:
+- Task is completed (move from DOING, change to `[x]`)
+
+**Prompt Format When Adding:**
+```
+"I notice [reason]. Should I add '[task description]' to [section]?"
+```
+
+---
+
+## WHEN TO MOVE TASKS BETWEEN SECTIONS
+
+### BACKLOG → TODO
+**Triggers:**
+- User says "let's prioritize [task]"
+- Task becomes unblocked
+- Dependencies are now satisfied
+- User explicitly says "move to TODO"
+- Planning session identifies high priority
+
+**Action:** Ask first unless explicit instruction
+
+### TODO → DOING
+**Triggers (AUTOMATIC):**
+- User says "let's work on [task]" or "start [task]"
+- You're about to begin work on a TODO task
+- User explicitly requests starting a task
+
+**Action:** Move automatically, inform user
+
+**Limit:** Keep DOING to 1-3 tasks maximum
+
+### DOING → TODO (Pausing)
+**Triggers:**
+- User says "let's pause this" or "work on something else"
+- Task is blocked and can't continue
+- Higher priority task emerges
+
+**Action:** Move back to TODO, add note if blocked
+
+### DOING → DONE
+**Triggers (AUTOMATIC):**
+- Task implementation is complete
+- All acceptance criteria met
+- Tests pass (if applicable)
+- User confirms completion
+
+**Action:** Move automatically, change to `[x]`, remind to sync
+
+### TODO/DOING → BACKLOG (Deprioritizing)
+**Triggers:**
+- User says "not urgent" or "defer this"
+- Requirements change
+- Task no longer relevant for current sprint/milestone
+
+**Action:** Ask first unless explicit instruction
+
+### ANY → DELETE
+**Triggers:**
+- User says "we don't need this anymore"
+- Task is duplicate
+- Task is obsolete
+
+**Action:** Ask for confirmation, explain why asking
+
+---
+
+## PROACTIVE TASK SUGGESTIONS
+
+### During Conversations, Watch For:
+
+**Code Changes:**
+- "This needs tests" → Suggest: Add "Write tests for [feature]" to TODO
+- "This is messy" → Suggest: Add "Refactor [component]" to BACKLOG
+- "We should document this" → Suggest: Add "Document [feature]" to TODO
+
+**Bugs/Issues:**
+- "This might break if..." → Add "Fix edge case in [feature]" to TODO
+- "This throws errors when..." → Add "Handle errors in [function]" to TODO
+
+**Dependencies:**
+- "We need X before Y" → Add X to TODO, keep Y in BACKLOG
+
+**Planning:**
+- Task seems large (>1 day work) → Suggest breaking into sub-tasks
+- Multiple unrelated things in one task → Suggest splitting
+
+**Completion:**
+- Task done but reveals issues → Suggest follow-up tasks
+
+### Proactive Prompt Examples:
+
+```
+"I notice this code needs tests. Should I add 'Write unit tests for UserAuth' to TODO?"
+
+"This task is quite large. Should we break it down into:
+- Implement basic structure (TODO)
+- Add error handling (TODO)  
+- Write documentation (TODO)?"
+
+"We just completed the API, but we'll need to update the docs. 
+Should I add 'Update API documentation' to TODO?"
+```
+
+### Don't Over-Prompt:
+- If user is clearly focused, batch suggestions
+- Don't interrupt flow for minor BACKLOG items
+- Save low-priority suggestions for end of session
+
+### After Completing ANY Task
+
+1. **IMMEDIATELY update _kanban.md**
+   - Move completed task to DONE section
+   - Change `[ ]` to `[x]`
+   - Add timestamp comment if helpful
+
+2. **ALWAYS remind user to sync**
+   ```
+   Task complete! Don't forget to sync:
+   kanban-sync _kanban.md
+   ```
+
+3. **Check for follow-up work**
+   - Ask if task completion revealed new tasks
+   - Offer to add them to kanban
+
+### Kanban Format Rules (Enforce Strictly)
+
+```markdown
+## BACKLOG
+*   [ ] Future tasks
+
+## TODO
+*   [ ] Ready to start
+
+## DOING
+*   [ ] Currently active (limit 1-3)
+
+## DONE
+*   [x] Completed tasks
+```
+
+**Format Requirements:**
+- Headers: `## ` (level 2, space after ##)
+- Tasks: `*   [ ]` (asterisk + 3 spaces + checkbox)
+- Completed: `*   [x]` (only in DONE section)
+- Column names: BACKLOG, TODO, DOING, DONE (case-insensitive)
+
+### When User Asks to Edit Code
+
+**Before making changes:**
+1. Check _kanban.md for related task
+2. If no task: "I notice this isn't tracked in _kanban.md. Should we add '[task description]' to TODO first?"
+3. Wait for confirmation before proceeding
+
+### When User Completes Work Session
+
+**Proactively suggest:**
+1. Review DOING section: "Want to move anything to DONE?"
+2. Review TODO priorities: "What should we focus on next?"
+3. Sync reminder: "Ready to sync your kanban to GitHub?"
+
+### When Starting New Features/Projects
+
+1. **Generate comprehensive kanban**
+   - Break feature into discrete tasks
+   - Prioritize in TODO
+   - Add nice-to-haves in BACKLOG
+
+2. **For Spec_Engine projects:**
+   ```bash
+   python spec-to-kanban.py SPECs/project/spec_project.md
+   ```
+
+### Red Flags (Block Work)
+
+- ❌ No _kanban.md exists
+- ❌ Task not in kanban
+- ❌ More than 5 tasks in DOING
+- ❌ Kanban hasn't been synced in 24+ hours (check .kanban.json timestamp)
+
+### Helpful Prompts
+
+**Task creation:**
+- "I'll add '[task]' to your TODO. [Edit _kanban.md]"
+
+**Task completion:**
+- "Great! I've marked '[task]' as complete. Don't forget: kanban-sync _kanban.md"
+
+**Session end:**
+- "Before we wrap up, let's sync your kanban. Run: kanban-sync _kanban.md"
+
+**Weekly review:**
+- "You completed X tasks this week! Want to review and plan next week?"
+
+### Integration with Development
+
+**Git commits:**
+- After helping with code that completes a task, remind about kanban update
+- Suggest: Update kanban → Sync → Git commit (in that order)
+
+**Pull requests:**
+- Include kanban status in PR descriptions
+- Reference completed tasks from kanban
+
+**Code reviews:**
+- Check if reviewed code has kanban tasks
+- Suggest creating tasks for issues found
+
+### Error Prevention
+
+**Never do this:**
+- ❌ Proceed with work without checking kanban
+- ❌ Complete task without updating kanban
+- ❌ Let user end session without sync reminder
+- ❌ Create duplicate tasks (check existing first)
+- ❌ Use wrong markdown format for tasks
+
+**Always do this:**
+- ✅ Check kanban before starting
+- ✅ Update kanban after completing
+- ✅ Remind to sync
+- ✅ Keep DOING section focused
+- ✅ Use proper markdown format
+
+### Example Workflow
+
+```
+User: "Let's implement caching"
+
+AI: "I notice 'implement caching' isn't in _kanban.md yet. 
+     Should I add it to TODO first? This helps track our progress."
+
+User: "Yes"
+
+AI: [Updates _kanban.md]
+    "Added to TODO. Moving to DOING now since we're starting work..."
+    [Moves task to DOING]
+    "Okay, let's implement caching. [proceeds with implementation]"
+
+[After implementation]
+
+AI: "Caching implemented! ✓
+     I've moved 'implement caching' to DONE in your kanban.
+     
+     Don't forget to sync:
+     kanban-sync _kanban.md
+     
+     Ready to commit the code?"
+```
+
+### Meta Rule
+
+**If ever uncertain whether to update kanban: UPDATE IT.**
+
+Better to over-track than under-track. The kanban is the source of truth for what's being worked on.
+
+### Enforcement Priority
+
+1. **Critical (Block work):** No kanban exists, task not tracked
+2. **High (Strong reminder):** Task complete but not moved to DONE
+3. **Medium (Gentle nudge):** Too many tasks in DOING, sync overdue
+4. **Low (Helpful suggestion):** Weekly review, task breakdown opportunities
+
+---
+
+**Remember:** Kanbanger makes work visible and trackable. Enforce its use consistently to maintain project clarity.
