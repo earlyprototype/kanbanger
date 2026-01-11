@@ -29,16 +29,141 @@
    - When starting work, move task from TODO to DOING
    - Keep DOING limited to 1-3 tasks (prevent multitasking)
 
-### During Work
+---
 
-1. **Update kanban for significant milestones**
-   - Breaking down tasks: Add sub-tasks to TODO
-   - Blocking issues: Add to BACKLOG with [BLOCKED] tag
-   - New discoveries: Add to TODO or BACKLOG
+## WHEN TO ADD NEW TASKS (Proactive Detection)
 
-2. **Keep user informed**
-   - Remind to sync after major kanban updates
-   - Suggest task breakdown if task is too large
+### Add to BACKLOG when:
+- User mentions "maybe we could..." or "in the future..."
+- You discover technical debt during code review
+- You identify optimization opportunities
+- Dependencies or prerequisites are discovered
+- Nice-to-have features are mentioned
+- User says "not now, but later"
+
+### Add to TODO when:
+- User says "we need to..." or "we should..."
+- You find bugs or issues that need fixing
+- Required refactoring is identified
+- Documentation needs writing
+- Tests need to be added
+- User explicitly requests a task
+- Work blocks current progress
+- Follow-up tasks emerge from completed work
+
+### Add to DOING when:
+- User says "let's do this now" or "start working on..."
+- Immediately moving a task from TODO
+- NEVER add directly to DOING without user confirmation
+
+### Add to DONE when:
+- Task is completed (move from DOING, change to `[x]`)
+
+**Prompt Format When Adding:**
+```
+"I notice [reason]. Should I add '[task description]' to [section]?"
+```
+
+---
+
+## WHEN TO MOVE TASKS BETWEEN SECTIONS
+
+### BACKLOG → TODO
+**Triggers:**
+- User says "let's prioritize [task]"
+- Task becomes unblocked
+- Dependencies are now satisfied
+- User explicitly says "move to TODO"
+- Planning session identifies high priority
+
+**Action:** Ask first unless explicit instruction
+
+### TODO → DOING
+**Triggers (AUTOMATIC):**
+- User says "let's work on [task]" or "start [task]"
+- You're about to begin work on a TODO task
+- User explicitly requests starting a task
+
+**Action:** Move automatically, inform user
+
+**Limit:** Keep DOING to 1-3 tasks maximum
+
+### DOING → TODO (Pausing)
+**Triggers:**
+- User says "let's pause this" or "work on something else"
+- Task is blocked and can't continue
+- Higher priority task emerges
+
+**Action:** Move back to TODO, add note if blocked
+
+### DOING → DONE
+**Triggers (AUTOMATIC):**
+- Task implementation is complete
+- All acceptance criteria met
+- Tests pass (if applicable)
+- User confirms completion
+
+**Action:** Move automatically, change to `[x]`, remind to sync
+
+### TODO/DOING → BACKLOG (Deprioritizing)
+**Triggers:**
+- User says "not urgent" or "defer this"
+- Requirements change
+- Task no longer relevant for current sprint/milestone
+
+**Action:** Ask first unless explicit instruction
+
+### ANY → DELETE
+**Triggers:**
+- User says "we don't need this anymore"
+- Task is duplicate
+- Task is obsolete
+
+**Action:** Ask for confirmation, explain why asking
+
+---
+
+## PROACTIVE TASK SUGGESTIONS
+
+### During Conversations, Watch For:
+
+**Code Changes:**
+- "This needs tests" → Suggest: Add "Write tests for [feature]" to TODO
+- "This is messy" → Suggest: Add "Refactor [component]" to BACKLOG
+- "We should document this" → Suggest: Add "Document [feature]" to TODO
+
+**Bugs/Issues:**
+- "This might break if..." → Add "Fix edge case in [feature]" to TODO
+- "This throws errors when..." → Add "Handle errors in [function]" to TODO
+
+**Dependencies:**
+- "We need X before Y" → Add X to TODO, keep Y in BACKLOG
+
+**Planning:**
+- Task seems large (>1 day work) → Suggest breaking into sub-tasks
+- Multiple unrelated things in one task → Suggest splitting
+
+**Completion:**
+- Task done but reveals issues → Suggest follow-up tasks
+
+### Proactive Prompt Examples:
+
+```
+"I notice this code needs tests. Should I add 'Write unit tests for UserAuth' to TODO?"
+
+"This task is quite large. Should we break it down into:
+- Implement basic structure (TODO)
+- Add error handling (TODO)  
+- Write documentation (TODO)?"
+
+"We just completed the API, but we'll need to update the docs. 
+Should I add 'Update API documentation' to TODO?"
+```
+
+### Don't Over-Prompt:
+- If user is clearly focused, batch suggestions
+- Don't interrupt flow for minor BACKLOG items
+- Save low-priority suggestions for end of session
 
 ### After Completing ANY Task
 

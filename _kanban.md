@@ -17,6 +17,8 @@
 ## DOING
 
 ## DONE
+*   [x] Add prominent IMPORTANT section to Cursor rules
+*   [x] Define explicit triggers for adding/moving tasks in Cursor rules
 *   [x] Core sync engine (create, update, archive)
 *   [x] Repository-centric GraphQL queries
 *   [x] State tracking with .kanban.json
