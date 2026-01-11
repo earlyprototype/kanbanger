@@ -1,5 +1,17 @@
 # Kanbanger Task Management Rules
 
+## IMPORTANT: EVERY PLAN MUST REFERENCE _kanban.md
+
+**CRITICAL INSTRUCTION:** When creating ANY plan, you MUST:
+1. Check current state of `_kanban.md` 
+2. Reference which tasks from `_kanban.md` will be worked on
+3. Include steps to update `_kanban.md` during execution
+4. Include reminder to sync at end: `kanban-sync _kanban.md`
+
+**Never create a plan without explicitly mentioning `_kanban.md` multiple times.**
+
+---
+
 ## MANDATORY: All work must be tracked in _kanban.md
 
 ### Before Starting ANY Task
