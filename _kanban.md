@@ -17,6 +17,7 @@
 ## DOING
 
 ## DONE
+*   [x] Create git hooks for kanban enforcement
 *   [x] Add prominent IMPORTANT section to Cursor rules
 *   [x] Define explicit triggers for adding/moving tasks in Cursor rules
 *   [x] Core sync engine (create, update, archive)
