@@ -9,13 +9,13 @@
 *   [ ] Support for custom field mappings beyond Status
 
 ## TODO
-*   [ ] Add CONTRIBUTING.md guide
 *   [ ] Set up GitHub Issues templates
 *   [ ] Consider PyPI publication
 
 ## DOING
 
 ## DONE
+*   [x] Add CONTRIBUTING.md guide
 *   [x] Create release/tag on GitHub
 *   [x] Update dist folder with git hooks and complete package
 *   [x] Create git hooks for kanban enforcement
