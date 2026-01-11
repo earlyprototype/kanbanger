@@ -1,0 +1,188 @@
+# Kanbanger Task Management Rules
+
+## MANDATORY: All work must be tracked in _kanban.md
+
+### Before Starting ANY Task
+
+1. **Check _kanban.md exists**
+   - If not: Create it immediately
+   - Use: `cp example_kanban.md _kanban.md` or generate from SPEC
+
+2. **Verify task is tracked**
+   - Check if task exists in TODO or DOING section
+   - If not: STOP and prompt user to add it
+   - Never proceed with untracked work
+
+3. **Move task to DOING**
+   - When starting work, move task from TODO to DOING
+   - Keep DOING limited to 1-3 tasks (prevent multitasking)
+
+### During Work
+
+1. **Update kanban for significant milestones**
+   - Breaking down tasks: Add sub-tasks to TODO
+   - Blocking issues: Add to BACKLOG with [BLOCKED] tag
+   - New discoveries: Add to TODO or BACKLOG
+
+2. **Keep user informed**
+   - Remind to sync after major kanban updates
+   - Suggest task breakdown if task is too large
+
+### After Completing ANY Task
+
+1. **IMMEDIATELY update _kanban.md**
+   - Move completed task to DONE section
+   - Change `[ ]` to `[x]`
+   - Add timestamp comment if helpful
+
+2. **ALWAYS remind user to sync**
+   ```
+   Task complete! Don't forget to sync:
+   kanban-sync _kanban.md
+   ```
+
+3. **Check for follow-up work**
+   - Ask if task completion revealed new tasks
+   - Offer to add them to kanban
+
+### Kanban Format Rules (Enforce Strictly)
+
+```markdown
+## BACKLOG
+*   [ ] Future tasks
+
+## TODO
+*   [ ] Ready to start
+
+## DOING
+*   [ ] Currently active (limit 1-3)
+
+## DONE
+*   [x] Completed tasks
+```
+
+**Format Requirements:**
+- Headers: `## ` (level 2, space after ##)
+- Tasks: `*   [ ]` (asterisk + 3 spaces + checkbox)
+- Completed: `*   [x]` (only in DONE section)
+- Column names: BACKLOG, TODO, DOING, DONE (case-insensitive)
+
+### When User Asks to Edit Code
+
+**Before making changes:**
+1. Check _kanban.md for related task
+2. If no task: "I notice this isn't tracked in _kanban.md. Should we add '[task description]' to TODO first?"
+3. Wait for confirmation before proceeding
+
+### When User Completes Work Session
+
+**Proactively suggest:**
+1. Review DOING section: "Want to move anything to DONE?"
+2. Review TODO priorities: "What should we focus on next?"
+3. Sync reminder: "Ready to sync your kanban to GitHub?"
+
+### When Starting New Features/Projects
+
+1. **Generate comprehensive kanban**
+   - Break feature into discrete tasks
+   - Prioritize in TODO
+   - Add nice-to-haves in BACKLOG
+
+2. **For Spec_Engine projects:**
+   ```bash
+   python spec-to-kanban.py SPECs/project/spec_project.md
+   ```
+
+### Red Flags (Block Work)
+
+- ❌ No _kanban.md exists
+- ❌ Task not in kanban
+- ❌ More than 5 tasks in DOING
+- ❌ Kanban hasn't been synced in 24+ hours (check .kanban.json timestamp)
+
+### Helpful Prompts
+
+**Task creation:**
+- "I'll add '[task]' to your TODO. [Edit _kanban.md]"
+
+**Task completion:**
+- "Great! I've marked '[task]' as complete. Don't forget: kanban-sync _kanban.md"
+
+**Session end:**
+- "Before we wrap up, let's sync your kanban. Run: kanban-sync _kanban.md"
+
+**Weekly review:**
+- "You completed X tasks this week! Want to review and plan next week?"
+
+### Integration with Development
+
+**Git commits:**
+- After helping with code that completes a task, remind about kanban update
+- Suggest: Update kanban → Sync → Git commit (in that order)
+
+**Pull requests:**
+- Include kanban status in PR descriptions
+- Reference completed tasks from kanban
+
+**Code reviews:**
+- Check if reviewed code has kanban tasks
+- Suggest creating tasks for issues found
+
+### Error Prevention
+
+**Never do this:**
+- ❌ Proceed with work without checking kanban
+- ❌ Complete task without updating kanban
+- ❌ Let user end session without sync reminder
+- ❌ Create duplicate tasks (check existing first)
+- ❌ Use wrong markdown format for tasks
+
+**Always do this:**
+- ✅ Check kanban before starting
+- ✅ Update kanban after completing
+- ✅ Remind to sync
+- ✅ Keep DOING section focused
+- ✅ Use proper markdown format
+
+### Example Workflow
+
+```
+User: "Let's implement caching"
+
+AI: "I notice 'implement caching' isn't in _kanban.md yet. 
+     Should I add it to TODO first? This helps track our progress."
+
+User: "Yes"
+
+AI: [Updates _kanban.md]
+    "Added to TODO. Moving to DOING now since we're starting work..."
+    [Moves task to DOING]
+    "Okay, let's implement caching. [proceeds with implementation]"
+
+[After implementation]
+
+AI: "Caching implemented! ✓
+     I've moved 'implement caching' to DONE in your kanban.
+     
+     Don't forget to sync:
+     kanban-sync _kanban.md
+     
+     Ready to commit the code?"
+```
+
+### Meta Rule
+
+**If ever uncertain whether to update kanban: UPDATE IT.**
+
+Better to over-track than under-track. The kanban is the source of truth for what's being worked on.
+
+### Enforcement Priority
+
+1. **Critical (Block work):** No kanban exists, task not tracked
+2. **High (Strong reminder):** Task complete but not moved to DONE
+3. **Medium (Gentle nudge):** Too many tasks in DOING, sync overdue
+4. **Low (Helpful suggestion):** Weekly review, task breakdown opportunities
+
+---
+
+**Remember:** Kanbanger makes work visible and trackable. Enforce its use consistently to maintain project clarity.

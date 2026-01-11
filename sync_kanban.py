@@ -430,7 +430,7 @@ class Syncer:
             
             if not item_id:
                 # New task - create it
-                print(f"  [CREATE] {title} -> {desired_status}")
+                print(f"  [CREATE] {title} => {desired_status}")
                 item_id = self.client.create_draft_issue(project_id, title)
                 self.state.update_task(title, item_id, desired_status)
                 
@@ -442,7 +442,7 @@ class Syncer:
                     )
             elif stored_status != desired_status:
                 # Status changed
-                print(f"  [UPDATE] {title}: {stored_status} -> {desired_status}")
+                print(f"  [UPDATE] {title}: {stored_status} => {desired_status}")
                 if desired_status in self.status_options:
                     self.client.update_item_status(
                         project_id, item_id, status_field_id,
@@ -469,6 +469,12 @@ class Syncer:
 
 
 def main():
+    # Fix console encoding for Windows
+    if sys.platform == 'win32':
+        import codecs
+        sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+        sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
+    
     parser = argparse.ArgumentParser(description='Sync markdown kanban to GitHub Projects')
     parser.add_argument('kanban_file', help='Path to the markdown kanban file')
     parser.add_argument('--repo', help='GitHub repo (owner/name)', default=os.environ.get('GITHUB_REPO'))
