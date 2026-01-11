@@ -9,11 +9,11 @@
 *   [ ] Support for custom field mappings beyond Status
 
 ## TODO
-*   [ ] Consider PyPI publication
 
 ## DOING
 
 ## DONE
+*   [x] Consider PyPI publication
 *   [x] Set up GitHub Issues templates
 *   [x] Add CONTRIBUTING.md guide
 *   [x] Create release/tag on GitHub
