@@ -1,24 +1,36 @@
-# kanban-project-sync
+# Kanbanger 🎯
 
-Powered by [fckgit](https://github.com/earlyprototype/fckgit) - Trusted by Vibe Warriors
+**MCP-First Task Management** - Let AI manage your kanban board, sync to GitHub Projects V2
 
-Sync your local markdown kanban boards to GitHub Projects V2. Keep your task management in version control while automatically updating your GitHub project boards.
+Built with the same `${workspaceFolder}` pattern as [fckgit](https://github.com/earlyprototype/fckgit) and [timepon](https://github.com/earlyprototype/thought_bubble)
 
-## Features
+## What is Kanbanger?
 
-- **Markdown-First** - Write tasks in your editor, not a browser
-- **Git-Versioned** - Track task history in version control
-- **Auto-Sync** - Push changes to GitHub Projects automatically
-- **Draft Issues** - Creates lightweight project cards
-- **LLM-Friendly** - Works great with AI assistants for task management
-- **State Tracking** - Smart diff engine syncs only what changed
+Kanbanger is an **MCP (Model Context Protocol) server** that gives AI assistants structured tools to manage your tasks. Your kanban board lives in markdown (`_kanban.md`) and automatically syncs to GitHub Projects.
+
+**Key Benefit**: AI can directly add, move, and sync tasks without you touching files or running commands.
 
 ## Quick Start
+
+```mermaid
+graph LR
+    A[Install] --> B[Run setup]
+    B --> C[Create board]
+    C --> D[AI manages tasks]
+    D --> E[Auto-sync to GitHub]
+    
+    style A fill:#4CAF50
+    style B fill:#2196F3
+    style D fill:#9C27B0
+    style E fill:#4CAF50
+```
 
 ### 1. Install
 
 ```bash
-pip install .
+git clone https://github.com/earlyprototype/kanbanger.git
+cd kanbanger
+pip install -e ".[mcp]"
 ```
 
 ### 2. Run Setup Wizard
@@ -27,335 +39,340 @@ pip install .
 kanban-sync-setup
 ```
 
-The interactive wizard will:
-- Guide you through GitHub token creation
-- Validate your repository access
-- Check project configuration
-- Create your `.env` file
-- Generate an example kanban
+The wizard walks you through:
+1. GitHub token setup
+2. Repository connection
+3. Project selection
+4. **MCP server configuration** (recommended!)
 
-### 3. Create Your First Kanban
+### 3. Restart Your IDE
+
+Close and reopen Cursor (or your IDE) to load the MCP server.
+
+### 4. Use It!
+
+**With AI (MCP mode):**
+```
+You: "Add a task to implement user auth to the TODO column"
+AI: [Calls add_task tool] ✅ Task added!
+
+You: "Move that task to DOING"
+AI: [Calls move_task tool] ✅ Task moved!
+
+You: "Sync to GitHub"
+AI: [Calls sync_to_github tool] ✅ Synced!
+```
+
+**Manual mode (still works!):**
+```bash
+# Edit _kanban.md manually, then:
+kanban-sync _kanban.md
+```
+
+## How It Works
+
+### MCP Integration (Recommended)
+
+Your AI assistant gets these **tools**:
+- `add_task(title, column, description)` - Add tasks
+- `move_task(title, from, to)` - Move between columns
+- `delete_task(title, column)` - Remove tasks
+- `list_tasks(column?)` - View tasks
+- `sync_to_github(dry_run)` - Push to GitHub
+- `get_sync_status()` - Check sync state
+
+And these **resources** (always visible):
+- `kanban://current-board` - Live board state
+- `kanban://stats` - Task counts
+- `kanban://sync-status` - GitHub sync info
+
+Plus **context prompts**:
+- `kanban_awareness` - Reminds AI about board
+- `task_planning` - Helps break down goals
+- `daily_standup` - Morning review
+- `github_sync_check` - Sync reminders
+
+### The Workflow
+
+```mermaid
+graph TD
+    Open[Open project in IDE] --> AI{Using AI?}
+    
+    AI -->|Yes| MCP[AI uses MCP tools]
+    AI -->|No| Manual[Edit _kanban.md manually]
+    
+    MCP --> Tasks[_kanban.md updated]
+    Manual --> Tasks
+    
+    Tasks --> Sync[Sync to GitHub<br/>via tool or command]
+    Sync --> Team[Team sees updates]
+    
+    style MCP fill:#2196F3
+```
+
+## Kanban Board Format
+
+Create `_kanban.md` in your project root:
 
 ```markdown
-# My Project Kanban
+# Project Kanban
 
 ## BACKLOG
 *   [ ] Future feature ideas
+*   [ ] Nice-to-have improvements
 
 ## TODO
-*   [ ] Ready to start tasks
+*   [ ] Ready to start
+*   [ ] Prioritized tasks
 
 ## DOING
 *   [ ] Currently active work
 
 ## DONE
 *   [x] Completed tasks
+*   [x] Finished features
 ```
 
-Save as `_kanban.md`
-
-### 4. Sync to GitHub
-
-```bash
-kanban-sync _kanban.md
-```
-
-Your GitHub Project board updates automatically!
-
-## Usage
-
-### Basic Commands
-
-```bash
-# Dry run (preview without syncing)
-kanban-sync _kanban.md --dry-run
-
-# Sync using .env file
-kanban-sync _kanban.md
-
-# Specify repo explicitly
-kanban-sync _kanban.md --repo username/repo
-
-# Specify project number
-kanban-sync _kanban.md --project 2
-```
-
-### What Happens During Sync
-
-- **New tasks** → Creates draft issues on GitHub
-- **Moved tasks** → Updates Status field
-- **Deleted tasks** → Archives on GitHub
-- **Unchanged tasks** → No API calls (efficient!)
-
-## Kanban Format
-
-### Structure
-
-```markdown
-## BACKLOG
-*   [ ] Task one
-*   [ ] Task two
-
-## TODO
-*   [ ] Task three
-
-## DOING
-*   [ ] Active task
-
-## DONE
-*   [x] Completed task
-```
-
-### Rules
-
-1. **Headers:** Use `## ` (level 2 markdown headers)
-2. **Tasks:** Use `*   [ ]` (asterisk + 3 spaces + checkbox)
-3. **Completed:** Use `[x]` only in DONE section
-4. **Column Names:** BACKLOG, TODO, DOING, or DONE (case-insensitive)
-
-### Column Mapping
-
-| Markdown Section | GitHub Status |
-|-----------------|---------------|
-| `BACKLOG` | Backlog |
-| `TODO` or `TO DO` | Todo |
-| `DOING` or `IN PROGRESS` | InProgress |
-| `DONE` or `COMPLETE` | Done |
+**That's it!** No special syntax, just markdown.
 
 ## Configuration
 
-### Using .env File (Recommended)
+### Per-Project Setup (Automatic)
 
-Create a `.env` file in your project:
-
-```bash
-GITHUB_TOKEN=ghp_your_token_here
-GITHUB_REPO=username/repo
-# Optional: specify project number if multiple linked
-GITHUB_PROJECT_NUMBER=1
-```
-
-### Environment Variables
-
-**Windows (PowerShell):**
-```powershell
-$env:GITHUB_TOKEN = "ghp_your_token"
-$env:GITHUB_REPO = "username/repo"
-```
-
-**Linux/Mac (Bash):**
-```bash
-export GITHUB_TOKEN="ghp_your_token"
-export GITHUB_REPO="username/repo"
-```
-
-## GitHub Token Setup
-
-1. Go to https://github.com/settings/tokens
-2. Click **"Generate new token (classic)"**
-3. Name it: `kanban-sync-tool`
-4. Select scopes:
-   - ✅ `repo` (Full control of repositories)
-   - ✅ `project` (Full control of projects)
-5. Copy the token (starts with `ghp_...`)
-
-## GitHub Project Setup
-
-### Link Project to Repository
-
-1. Go to your repository on GitHub
-2. Click **"Projects"** tab
-3. Click **"Link a project"**
-4. Create or select a project
-
-### Configure Status Field
-
-Your project needs a **Status** field with these options:
-
-1. Click **"+ New field"** in your project
-2. Choose **"Single select"**
-3. Name it **"Status"**
-4. Add these options:
-   - `Backlog`
-   - `Todo`
-   - `InProgress`
-   - `Done`
-
-## Workflow Examples
-
-### Daily Task Management
-
-```bash
-# Edit your kanban file
-nano _kanban.md
-
-# Sync changes
-kanban-sync _kanban.md
-```
-
-### With Git Integration
-
-```bash
-# Edit kanban
-nano _kanban.md
-
-# Commit to version control
-git add _kanban.md
-git commit -m "Update tasks"
-
-# Sync to GitHub Projects
-kanban-sync _kanban.md
-```
-
-### Git Hook (Auto-Sync on Commit)
-
-Add to `.git/hooks/post-commit`:
-
-```bash
-#!/bin/sh
-if git diff-tree --no-commit-id --name-only -r HEAD | grep -q "_kanban.md"; then
-    kanban-sync _kanban.md
-fi
-```
-
-Make it executable:
-```bash
-chmod +x .git/hooks/post-commit
-```
-
-## Working with AI Assistants
-
-This tool works great with LLMs like ChatGPT, Claude, or Copilot for conversational task management.
-
-**Example:**
-
-> **You:** "Add 'implement caching' to my TODO"  
-> **AI:** [Edits `_kanban.md` with proper format]  
-> **You:** `kanban-sync _kanban.md`  
-> **Tool:** Creates task on GitHub
-
-See `LLM_GUIDANCE.md` for detailed AI assistant instructions.
-
-## Troubleshooting
-
-### Command Not Found
-
-**Solution:** Use Python module syntax
-```bash
-python -m sync_kanban _kanban.md
-```
-
-Or add Scripts to PATH:
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-### No Projects Found
-
-**Solution:** Link a project to your repository
-1. Go to your repo on GitHub
-2. Click "Projects" → "Link a project"
-3. Create or select a project
-
-### No Status Field
-
-**Solution:** Add Status field to your project
-1. Open project on GitHub
-2. Click "+ New field"
-3. Choose "Single select"
-4. Name it "Status"
-5. Add options: Backlog, Todo, InProgress, Done
-
-### Token Errors (401/403)
-
-**Solution:** Check your GitHub token
-- Ensure `GITHUB_TOKEN` is set in `.env`
-- Token needs `repo` and `project` scopes
-- Token may be expired - generate a new one
-
-## State Tracking
-
-The tool creates a `.kanban.json` file to track GitHub item IDs:
+The setup wizard creates `.cursor/mcp.json`:
 
 ```json
 {
-  "project_id": "PVT_...",
-  "tasks": {
-    "Task title": {
-      "item_id": "PVTI_...",
-      "status": "Todo"
+    "mcpServers": {
+        "kanbanger": {
+            "command": "python",
+            "args": ["-m", "kanbanger_mcp"],
+            "env": {
+                "KANBANGER_WORKSPACE": "${workspaceFolder}",
+                "GITHUB_TOKEN": "${env:GITHUB_TOKEN}",
+                "GITHUB_REPO": "${env:GITHUB_REPO}",
+                "GITHUB_PROJECT_NUMBER": "${env:GITHUB_PROJECT_NUMBER}"
+            }
+        }
     }
-  }
 }
 ```
 
-**Important:**
-- Add `.kanban.json` to `.gitignore` (done automatically)
-- Task titles are unique identifiers
-- Renaming a task creates a new item
+**Key Features:**
+- `${workspaceFolder}` - Automatically resolves to your project path
+- `${env:VAR}` - Loads from environment (secrets stay in `.env`)
+- **Portable** - Same config works on any machine
+- **Per-project** - Each workspace independent
 
-## Best Practices
+### Environment Variables
 
-1. **Version Control** - Commit `_kanban.md` to track task history
-2. **Ignore State** - Add `.kanban.json` to `.gitignore`
-3. **Descriptive Titles** - Use clear, specific task descriptions
-4. **Regular Sync** - Sync frequently or use git hooks
-5. **Preview First** - Use `--dry-run` before syncing
+Create `.env` in your project (wizard does this):
 
-## File Structure
-
-```
-your-project/
-├── .env                # Config (gitignored)
-├── .gitignore          # Includes .kanban.json, .env
-├── _kanban.md          # Your kanban board (commit this)
-├── .kanban.json        # State file (gitignored)
-└── .git/hooks/
-    └── post-commit     # Optional: auto-sync
+```env
+GITHUB_TOKEN=your_token_here
+GITHUB_REPO=owner/repo
+GITHUB_PROJECT_NUMBER=6  # optional, auto-detects
 ```
 
-## How It Works
+**Get GitHub Token:**
+1. GitHub Settings → Developer Settings → Personal Access Tokens
+2. Generate new token (classic)
+3. Required scopes: `repo`, `project`, `read:org`
 
-1. **Parse** markdown file into tasks + columns
-2. **Load** state from `.kanban.json`
-3. **Connect** to GitHub via GraphQL API
-4. **Fetch** current project items
-5. **Diff** local vs remote state
-6. **Apply** changes (create/update/archive)
-7. **Save** updated state
+## Commands
 
-## Requirements
+| Command | Purpose |
+|---------|---------|
+| `kanban-sync-setup` | Run interactive setup wizard |
+| `kanban-sync _kanban.md --dry-run` | Preview changes (safe) |
+| `kanban-sync _kanban.md` | Sync to GitHub |
+| `python -m kanbanger_mcp --help` | MCP server options |
 
-- Python 3.8+
-- Git (optional, for hooks)
-- GitHub account with repository access
-- GitHub Projects V2 (not Classic Projects)
+**Or just ask your AI!**
+- "Add task X to TODO"
+- "Move task Y to DOING"
+- "Sync to GitHub"
 
-## Dependencies
+## Why MCP-First?
 
-- `requests>=2.25.0`
-- `python-dotenv>=0.19.0`
+### Traditional Approach (Fragile)
+```
+User: "Add a task"
+AI: *Reads _kanban.md*
+AI: *Edits file with search/replace*
+AI: *Runs terminal command*
+AI: *Hopes nothing broke*
+```
 
-Installed automatically via `pip install .`
+### MCP Approach (Robust)
+```
+User: "Add a task"
+AI: add_task("Task name", "TODO") ✅
+```
 
-## Contributing
+**Benefits:**
+- ✅ Type-safe, validated operations
+- ✅ AI always aware of board state (resources)
+- ✅ Context injected automatically (prompts)
+- ✅ Works across all AI clients (Cursor, Claude, etc.)
+- ✅ No parsing errors or file corruption
 
-Contributions welcome! Please:
-- Follow existing code style
-- Add tests for new features
-- Update documentation
-- Keep commits focused
+## Multiple Projects
+
+Each project gets its own MCP server:
+
+```
+ProjectA/
+├── .cursor/mcp.json  # Uses ${workspaceFolder}
+├── _kanban.md
+└── .env
+
+ProjectB/
+├── .cursor/mcp.json  # Same config, different workspace!
+├── _kanban.md
+└── .env
+```
+
+**No path editing needed!** The `${workspaceFolder}` variable handles everything.
+
+## Documentation
+
+- **[MCP Setup Guide](MCP_SETUP.md)** - Detailed MCP configuration for Cursor, Claude Desktop, VS Code
+- **[Setup Flow Diagram](docs/setup-flow.md)** - Visual guide
+- **[LLM Guidance](LLM_GUIDANCE.md)** - How AI should use kanbanger
+- **[Contributing](CONTRIBUTING.md)** - How to contribute
+
+## Git Hooks (Optional Enforcement)
+
+Want to ensure the board is always synced? Install git hooks:
+
+```bash
+cd git-hooks
+./install-hooks.sh  # or install-hooks.ps1 on Windows
+```
+
+- **Pre-commit**: Checks board is synced before commit
+- **Post-commit**: Auto-syncs after commit
+
+## Troubleshooting
+
+### MCP Tools Not Showing
+
+1. **Check installation:**
+```bash
+pip show mcp-use
+```
+
+2. **Check config exists:**
+```bash
+ls .cursor/mcp.json
+```
+
+3. **Restart IDE** - Required after config changes
+
+4. **Check IDE logs:**
+   - Cursor: View → Output → Select "MCP"
+
+### Sync Failures
+
+1. **Verify credentials:**
+```bash
+# Check .env exists
+cat .env
+
+# Test token
+curl -H "Authorization: token YOUR_TOKEN" https://api.github.com/user
+```
+
+2. **Check project exists:**
+   - Go to your repo on GitHub
+   - Verify Project is linked
+   - Check Status field has: Backlog, Todo, InProgress, Done
+
+### Wrong Workspace
+
+If MCP server can't find `_kanban.md`:
+
+1. **Use local config** - `.cursor/mcp.json` in project root (not global)
+2. **Check workspace** - IDE opened correct folder?
+3. **Restart IDE** - Reload configuration
+
+## FAQ
+
+**Q: Can I use CLI without MCP?**  
+A: Yes! `kanban-sync _kanban.md` works standalone.
+
+**Q: Does MCP work in other IDEs?**  
+A: Yes! Cursor, Claude Desktop, VS Code (with extension), any MCP client.
+
+**Q: What if I already use GitHub Projects?**  
+A: Kanbanger syncs one-way: local → GitHub. Your project becomes a view of your markdown.
+
+**Q: Can I use with multiple GitHub Projects?**  
+A: Yes, different project per workspace. Each workspace configured independently.
+
+**Q: Is PyPI available?**  
+A: Not yet. We're focusing on API stability first. Use git installation for now.
+
+## Examples
+
+### AI Workflow
+```
+Morning:
+You: "Show me daily standup prompt"
+AI: [Shows standup review with current board state]
+
+You: "Add task to implement OAuth to TODO"
+AI: ✅ Added
+
+You: "I'm starting work on OAuth"  
+AI: ✅ Moved to DOING
+
+Afternoon:
+You: "OAuth is done"
+AI: ✅ Moved to DONE
+
+Evening:
+You: "Sync everything to GitHub"
+AI: ✅ Synced - 1 created, 1 updated
+```
+
+### Manual Workflow
+```bash
+# Edit _kanban.md in your editor
+vim _kanban.md
+
+# Preview changes
+kanban-sync _kanban.md --dry-run
+
+# Sync for real
+kanban-sync _kanban.md
+```
+
+## Project Status
+
+- ✅ MCP Server (v2.1.0)
+- ✅ GitHub Projects V2 sync
+- ✅ Interactive setup wizard
+- ✅ Git hooks
+- ✅ Cursor rules enforcement
+- ✅ Distribution package
+- 🔄 Bidirectional sync (planned)
+- 🔄 Multiple kanban files (planned)
+- 🔄 VS Code extension (planned)
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file
+MIT - See [LICENSE](LICENSE)
+
+## Contributing
+
+Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## Credits
 
-Built with love by the Vibe Warriors.  
-Powered by [fckgit](https://github.com/earlyprototype/fckgit).
+Built with the Model Context Protocol (MCP) ecosystem. Inspired by the workspace-aware patterns in [fckgit](https://github.com/earlyprototype/fckgit).
 
-## Support
+---
 
-- Issues: https://github.com/earlyprototype/kanbanger/issues
-- Documentation: See `LLM_GUIDANCE.md` for AI assistant usage
+**Made with ❤️ for developers who want AI-assisted task management without leaving their editor.**
