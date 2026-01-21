@@ -31,6 +31,10 @@ env/
 *.swp
 *.swo
 
+# Cursor MCP config can be shared with team (no secrets in it)
+# Uses ${workspaceFolder} and ${env:VAR} for portability
+# .cursor/mcp.json is NOT ignored - commit it!
+
 # Kanban state files (local only)
 .kanban.json
 
