@@ -104,7 +104,7 @@ def main():
     print(f"Transport: {args.transport}", file=sys.stderr)
     
     if args.transport == "stdio":
-        server.run(transport="stdio", debug=args.debug)
+        server.run(transport="stdio")
     else:
         print(f"Server running on {args.host}:{args.port}", file=sys.stderr)
         server.run(
