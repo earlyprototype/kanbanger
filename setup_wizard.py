@@ -273,6 +273,75 @@ def create_example_kanban():
     return True
 
 
+def setup_mcp_server():
+    """Set up MCP server configuration for the current workspace."""
+    import json
+    
+    # Create .cursor directory if it doesn't exist
+    cursor_dir = Path(".cursor")
+    cursor_dir.mkdir(exist_ok=True)
+    
+    mcp_config_path = cursor_dir / "mcp.json"
+    
+    # Check if mcp.json already exists
+    if mcp_config_path.exists():
+        print_info(".cursor/mcp.json already exists")
+        if not yes_no("Overwrite existing configuration?", default=False):
+            return False
+        # Backup existing config
+        backup_path = cursor_dir / "mcp.json.backup"
+        import shutil
+        shutil.copy(mcp_config_path, backup_path)
+        print_info(f"Backed up to {backup_path}")
+    
+    # Create MCP configuration
+    mcp_config = {
+        "mcpServers": {
+            "kanbanger": {
+                "command": "python",
+                "args": ["-m", "kanbanger_mcp"],
+                "env": {
+                    "KANBANGER_WORKSPACE": "${workspaceFolder}",
+                    "GITHUB_TOKEN": "${env:GITHUB_TOKEN}",
+                    "GITHUB_REPO": "${env:GITHUB_REPO}",
+                    "GITHUB_PROJECT_NUMBER": "${env:GITHUB_PROJECT_NUMBER}"
+                }
+            }
+        }
+    }
+    
+    # Write configuration
+    try:
+        with open(mcp_config_path, 'w', encoding='utf-8') as f:
+            json.dump(mcp_config, f, indent=4)
+        print_success(f"Created {mcp_config_path}")
+        
+        # Check if MCP package is installed
+        try:
+            import mcp_use
+            print_success("MCP dependencies are installed")
+        except ImportError:
+            print_info("MCP dependencies not installed")
+            print("Install with: pip install -e \".[mcp]\"")
+            if yes_no("Install MCP dependencies now?", default=True):
+                import subprocess
+                try:
+                    subprocess.run(
+                        [sys.executable, "-m", "pip", "install", "mcp-use>=1.0.0"],
+                        check=True,
+                        capture_output=True
+                    )
+                    print_success("MCP dependencies installed")
+                except subprocess.CalledProcessError as e:
+                    print_error(f"Failed to install: {e}")
+                    return False
+        
+        return True
+    except Exception as e:
+        print_error(f"Failed to create MCP config: {e}")
+        return False
+
+
 def main():
     """Run the setup wizard."""
     print_header("kanban-project-sync Setup Wizard")
@@ -404,7 +473,7 @@ def main():
         sys.exit(1)
     
     # Step 6: Save Configuration
-    print_step(6, 6, "Saving Configuration")
+    print_step(6, 7, "Saving Configuration")
     
     create_env_file(token, repo, project_number)
     
@@ -414,19 +483,44 @@ def main():
     print("\n" + "=" * 60)
     if yes_no("Create an example _kanban.md file?", default=True):
         if create_example_kanban():
-            print("\nYou can now test the sync:")
-            print("  kanban-sync _kanban.md --dry-run")
-            print("\nOr do a real sync:")
-            print("  kanban-sync _kanban.md")
+            print_success("Created example _kanban.md")
+    
+    # Step 7: MCP Server Setup
+    print_step(7, 7, "MCP Server Setup (Optional)")
+    
+    print("The MCP (Model Context Protocol) server allows AI assistants")
+    print("to interact with your kanban board using structured tools.")
+    print()
+    print("Benefits:")
+    print("  - LLMs can directly call tools (add_task, move_task, etc.)")
+    print("  - Better 'presence of mind' with resources and prompts")
+    print("  - Works in Cursor, Claude Desktop, VS Code, etc.")
+    print()
+    
+    if yes_no("Set up MCP server for this workspace?", default=True):
+        if setup_mcp_server():
+            print_success("MCP server configured!")
+            print()
+            print("To activate:")
+            print("  1. Restart Cursor (or your IDE)")
+            print("  2. Ask AI: 'What MCP tools do you have available?'")
+            print()
+            print("See MCP_SETUP.md for detailed documentation")
+        else:
+            print_info("MCP setup skipped or failed")
+            print("You can run the installer later:")
+            print("  powershell -ExecutionPolicy Bypass -File install-mcp-to-workspace.ps1")
     
     print("\n" + "=" * 60)
     print("  Setup Complete!")
     print("=" * 60)
     print("\nNext steps:")
-    print("  1. Create or edit your kanban markdown file")
-    print("  2. Run: kanban-sync your-file.md --dry-run")
-    print("  3. When ready: kanban-sync your-file.md")
+    print("  1. Restart your IDE (if you set up MCP)")
+    print("  2. Create or edit your kanban markdown file")
+    print("  3. Run: kanban-sync your-file.md --dry-run")
+    print("  4. When ready: kanban-sync your-file.md")
     print("\nFor help: kanban-sync --help")
+    print("For MCP help: See MCP_SETUP.md")
     print()
 
 
