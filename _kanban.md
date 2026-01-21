@@ -11,6 +11,7 @@
 ## TODO
 
 ## DOING
+*   [ ] Implement MCP server for LLM integration (resources, tools, prompts)
 
 ## DONE
 *   [x] Consider PyPI publication
