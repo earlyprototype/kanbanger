@@ -57,7 +57,34 @@ if (Test-Path $mcpConfigPath) {
 # Get the kanbanger installation directory (where this script is)
 $kanbangerRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-# Create MCP configuration
+# Check for .env file and read values
+$envFile = Join-Path $workspaceRoot ".env"
+$githubToken = "your_github_token_here"
+$githubRepo = "owner/repo"
+$githubProjectNumber = ""
+
+if (Test-Path $envFile) {
+    Write-Host "Reading credentials from .env file..." -ForegroundColor Cyan
+    $envContent = Get-Content $envFile
+    
+    foreach ($line in $envContent) {
+        if ($line -match '^GITHUB_TOKEN=(.+)') {
+            $githubToken = $matches[1]
+        }
+        elseif ($line -match '^GITHUB_REPO=(.+)') {
+            $githubRepo = $matches[1]
+        }
+        elseif ($line -match '^GITHUB_PROJECT_NUMBER=(.+)') {
+            $githubProjectNumber = $matches[1]
+        }
+    }
+    Write-Host "Loaded credentials from .env" -ForegroundColor Green
+} else {
+    Write-Host "WARNING: No .env file found!" -ForegroundColor Red
+    Write-Host "MCP config will be created with placeholder values.`n" -ForegroundColor Yellow
+}
+
+# Create MCP configuration with actual values (not ${env:VAR} placeholders)
 $mcpConfig = @{
     mcpServers = @{
         kanbanger = @{
@@ -65,9 +92,9 @@ $mcpConfig = @{
             args = @("-m", "kanbanger_mcp")
             env = @{
                 KANBANGER_WORKSPACE = "`${workspaceFolder}"
-                GITHUB_TOKEN = "`${env:GITHUB_TOKEN}"
-                GITHUB_REPO = "`${env:GITHUB_REPO}"
-                GITHUB_PROJECT_NUMBER = "`${env:GITHUB_PROJECT_NUMBER}"
+                GITHUB_TOKEN = $githubToken
+                GITHUB_REPO = $githubRepo
+                GITHUB_PROJECT_NUMBER = $githubProjectNumber
             }
         }
     }
@@ -77,11 +104,7 @@ $mcpConfig = @{
 $mcpConfig | ConvertTo-Json -Depth 10 | Set-Content -Path $mcpConfigPath -Encoding UTF8
 Write-Host "Created .cursor/mcp.json with workspace configuration`n" -ForegroundColor Green
 
-# Check for .env file
-$envFile = Join-Path $workspaceRoot ".env"
 if (-not (Test-Path $envFile)) {
-    Write-Host "WARNING: No .env file found!" -ForegroundColor Red
-    Write-Host "You need to create .env with your GitHub credentials:`n" -ForegroundColor Yellow
     Write-Host "GITHUB_TOKEN=your_token_here" -ForegroundColor Gray
     Write-Host "GITHUB_REPO=owner/repo" -ForegroundColor Gray
     Write-Host "GITHUB_PROJECT_NUMBER=6  # optional`n" -ForegroundColor Gray
@@ -99,10 +122,27 @@ GITHUB_PROJECT_NUMBER=  # optional, will auto-detect
     }
 }
 
-Write-Host "===========================================`n" -ForegroundColor Cyan
+# Check .gitignore and add .cursor/mcp.json if needed
+$gitignorePath = Join-Path $workspaceRoot ".gitignore"
+if (Test-Path $gitignorePath) {
+    $gitignoreContent = Get-Content $gitignorePath -Raw
+    if ($gitignoreContent -notmatch "\.cursor/mcp\.json") {
+        Add-Content $gitignorePath "`n# Cursor MCP config with secrets`n.cursor/mcp.json"
+        Write-Host "Added .cursor/mcp.json to .gitignore" -ForegroundColor Green
+    }
+} else {
+    Write-Host "WARNING: No .gitignore found - remember not to commit .cursor/mcp.json!" -ForegroundColor Yellow
+}
+
+Write-Host "`n===========================================`n" -ForegroundColor Cyan
 Write-Host "Installation Complete!`n" -ForegroundColor Green
 Write-Host "Next Steps:" -ForegroundColor Cyan
-Write-Host "1. Edit .env with your GitHub token and repo" -ForegroundColor White
-Write-Host "2. Restart Cursor to load the MCP server" -ForegroundColor White
-Write-Host "3. Verify by asking AI: 'What MCP tools do you have?'`n" -ForegroundColor White
+if (Test-Path $envFile) {
+    Write-Host "1. Restart Cursor to load the MCP server" -ForegroundColor White
+    Write-Host "2. Verify by asking AI: 'What MCP tools do you have?'`n" -ForegroundColor White
+} else {
+    Write-Host "1. Create .env with your GitHub credentials" -ForegroundColor White
+    Write-Host "2. Re-run this installer to populate MCP config" -ForegroundColor White
+    Write-Host "3. Restart Cursor to load the MCP server`n" -ForegroundColor White
+}
 Write-Host "Documentation: See MCP_SETUP.md for details`n" -ForegroundColor Gray

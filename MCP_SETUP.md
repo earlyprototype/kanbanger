@@ -31,7 +31,7 @@ python -m kanbanger_mcp --help
 
 ### 1. Create Configuration File
 
-Create `.cursor/mcp.json` in your project root:
+Create `.cursor/mcp.json` in your project root with **actual values** (not `${env:VAR}` placeholders):
 
 ```json
 {
@@ -41,20 +41,27 @@ Create `.cursor/mcp.json` in your project root:
             "args": ["-m", "kanbanger_mcp"],
             "env": {
                 "KANBANGER_WORKSPACE": "${workspaceFolder}",
-                "GITHUB_TOKEN": "${env:GITHUB_TOKEN}",
-                "GITHUB_REPO": "${env:GITHUB_REPO}",
-                "GITHUB_PROJECT_NUMBER": "${env:GITHUB_PROJECT_NUMBER}"
+                "GITHUB_TOKEN": "ghp_your_actual_token_here",
+                "GITHUB_REPO": "owner/repo",
+                "GITHUB_PROJECT_NUMBER": "7"
             }
         }
     }
 }
 ```
 
-**Note:** You can copy `.cursor/mcp.json.template` and rename it to `.cursor/mcp.json`.
+**Important Notes:**
+- Use `${workspaceFolder}` for workspace path (Cursor resolves this automatically)
+- Put **actual values** for GitHub credentials (not `${env:GITHUB_TOKEN}`)
+- The installer script reads your `.env` and populates these automatically
+- Add `.cursor/mcp.json` to `.gitignore` to avoid committing secrets
 
-### 2. Set Environment Variables
+**Quick Setup:** Run `install-mcp-to-workspace.ps1` - it reads your `.env` and creates this file for you!
 
-Ensure your `.env` file contains:
+### 2. Keep .env File for CLI Usage
+
+Your `.env` file is still needed for the CLI tool (`kanban-sync`):
+
 
 ```env
 GITHUB_TOKEN=your_github_token_here
