@@ -1,6 +1,7 @@
 # Kanbanger Development Kanban
 
 ## BACKLOG
+*   [ ] Enhanced CLI tool for direct task management (add, move, list without MCP)
 *   [ ] Add bidirectional sync (GitHub → Markdown)
 *   [ ] Support for multiple kanban files in one repo
 *   [ ] Webhook support for real-time GitHub updates
