@@ -5,6 +5,7 @@ Callable functions that LLMs can use to interact with kanban boards.
 """
 
 import os
+import sys
 import json
 import subprocess
 from typing import Optional
@@ -327,27 +328,35 @@ def register_tools(server: MCPServer):
         if not os.getenv("GITHUB_REPO"):
             return "Error: GITHUB_REPO environment variable not set"
         
-        # Build command
-        cmd = ["python", "-m", "sync_kanban", kanban_path]
+        TIMEOUT_SEC = int(os.getenv("KANBANGER_SYNC_TIMEOUT_SEC", "60"))
+
+        # Audit R4: use sys.executable instead of bare "python" so the
+        # subprocess always runs under the same interpreter as the MCP server.
+        cmd = [sys.executable, "-m", "sync_kanban", kanban_path]
         if dry_run:
             cmd.append("--dry-run")
-        
+
         try:
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 cwd=workspace,
-                encoding='utf-8'
+                encoding='utf-8',
+                timeout=TIMEOUT_SEC,
             )
-            
-            if result.returncode == 0:
-                mode = "preview" if dry_run else "complete"
-                return f"Sync {mode}:\n\n{result.stdout}"
-            else:
-                return f"Sync failed:\n\n{result.stderr}"
-        except Exception as e:
-            return f"Error running sync: {str(e)}"
+        except subprocess.TimeoutExpired:
+            return (
+                f"Error: sync_to_github timed out after {TIMEOUT_SEC}s "
+                f"(set KANBANGER_SYNC_TIMEOUT_SEC to override; "
+                f"check GITHUB_REPO env var and network reachability)"
+            )
+
+        if result.returncode == 0:
+            mode = "preview" if dry_run else "complete"
+            return f"Sync {mode}:\n\n{result.stdout}"
+        else:
+            return f"Sync failed:\n\n{result.stderr}"
     
     @server.tool()
     def get_sync_status() -> str:

@@ -487,14 +487,19 @@ def main():
     # Convert project number from env var
     if args.project and isinstance(args.project, str):
         args.project = int(args.project) if args.project.isdigit() else None
-    
+
+    # Fail-fast on missing repo BEFORE any work, including --dry-run.
+    if not args.repo:
+        print("Error: --repo or GITHUB_REPO environment variable required", file=sys.stderr)
+        sys.exit(1)
+
     if not os.path.exists(args.kanban_file):
         print(f"Error: File not found: {args.kanban_file}")
         sys.exit(1)
-    
+
     # Initialize components
     board = LocalBoard(args.kanban_file)
-    
+
     if args.dry_run:
         print(f"Parsing {args.kanban_file}...")
         tasks = board.parse()
@@ -505,11 +510,7 @@ def main():
                 status = "[x]" if item.get('done') else "[ ]"
                 print(f"  {status} {item['title']}")
         return
-    
-    if not args.repo:
-        print("Error: --repo or GITHUB_REPO environment variable required")
-        sys.exit(1)
-    
+
     token = os.environ.get('GITHUB_TOKEN')
     if not token:
         print("Error: GITHUB_TOKEN environment variable not set")
