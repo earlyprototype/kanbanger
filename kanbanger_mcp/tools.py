@@ -12,6 +12,8 @@ import threading
 from typing import Optional
 from mcp_use.server import MCPServer
 
+from .io import atomic_write_text
+
 
 def get_workspace() -> str:
     """Get the current workspace directory."""
@@ -76,10 +78,9 @@ def register_tools(server: MCPServer):
                 lines.insert(i + 1, task_line)
                 break
         
-        # Write back
+        # R1: atomic markdown write (temp + fsync + os.replace).
         try:
-            with open(kanban_path, 'w', encoding='utf-8') as f:
-                f.write('\n'.join(lines))
+            atomic_write_text(kanban_path, '\n'.join(lines))
         except Exception as e:
             return f"Error writing kanban board: {str(e)}"
         
@@ -161,10 +162,9 @@ def register_tools(server: MCPServer):
                 lines.insert(i + 1, task_line)
                 break
         
-        # Write back
+        # R1: atomic markdown write (temp + fsync + os.replace).
         try:
-            with open(kanban_path, 'w', encoding='utf-8') as f:
-                f.write('\n'.join(lines))
+            atomic_write_text(kanban_path, '\n'.join(lines))
         except Exception as e:
             return f"Error writing kanban board: {str(e)}"
         
@@ -221,10 +221,9 @@ def register_tools(server: MCPServer):
         if not task_found:
             return f"Error: Task '{title}' not found in {column}"
         
-        # Write back
+        # R1: atomic markdown write (temp + fsync + os.replace).
         try:
-            with open(kanban_path, 'w', encoding='utf-8') as f:
-                f.write('\n'.join(lines))
+            atomic_write_text(kanban_path, '\n'.join(lines))
         except Exception as e:
             return f"Error writing kanban board: {str(e)}"
         
