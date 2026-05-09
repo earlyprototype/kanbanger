@@ -7,12 +7,34 @@ Callable functions that LLMs can use to interact with kanban boards.
 import os
 import sys
 import json
+import difflib
 import subprocess
 import threading
 from typing import Optional
 from mcp_use.server import MCPServer
 
 from kanban_io import atomic_write_text, kanban_lock
+
+
+def _parse_task_title(line: str) -> Optional[str]:
+    """Extract the title portion of a markdown task line, or None.
+
+    Mirrors the parsing list_tasks already does: strip the leading bullet,
+    optional `[ ]` / `[x]` checkbox, and any ` - description` suffix.
+    Returns None for lines that aren't task entries.
+
+    R5: this is the canonical title extraction used by move_task /
+    delete_task for exact-equality comparison and near-match suggestions.
+    """
+    stripped = line.strip()
+    if not stripped.startswith("*"):
+        return None
+    title = stripped[1:].strip()  # remove leading *
+    if title.startswith("[ ]") or title.startswith("[x]"):
+        title = title[3:].strip()  # remove checkbox
+    if " - " in title:
+        title = title.split(" - ")[0].strip()  # drop description suffix
+    return title
 
 
 def get_workspace() -> str:
@@ -131,24 +153,36 @@ def register_tools(server: MCPServer):
 
             lines = content.split('\n')
 
-            # Find the task in from_column
+            # R5: find the task in from_column by exact title equality;
+            # collect titles along the way so a miss can offer near-match hints.
             task_line = None
             task_index = None
             in_from_column = False
+            seen_titles: list = []
 
             for i, line in enumerate(lines):
-                if line.strip() == f"## {from_column}":
+                s = line.strip()
+                if s == f"## {from_column}":
                     in_from_column = True
                     continue
-                elif line.strip().startswith("## ") and in_from_column:
+                if s.startswith("## ") and in_from_column:
                     break  # Entered next column
 
-                if in_from_column and title in line and line.strip().startswith("*"):
-                    task_line = line
-                    task_index = i
-                    break
+                if in_from_column:
+                    parsed = _parse_task_title(line)
+                    if parsed is not None:
+                        seen_titles.append(parsed)
+                        if parsed == title:
+                            task_line = line
+                            task_index = i
+                            break
 
             if task_line is None:
+                suggestions = difflib.get_close_matches(title, seen_titles, n=3, cutoff=0.6)
+                if suggestions:
+                    hint = ", ".join(repr(s) for s in suggestions)
+                    return (f"Error: Task '{title}' not found in {from_column}. "
+                            f"Did you mean: {hint}?")
                 return f"Error: Task '{title}' not found in {from_column}"
 
             # Remove from source column
@@ -208,24 +242,37 @@ def register_tools(server: MCPServer):
 
             lines = content.split('\n')
 
-            # Find and remove the task
-            task_found = False
+            # R5: find by exact title equality; collect titles for near-match
+            # hints if the lookup misses.
+            task_index = None
             in_column = False
+            seen_titles: list = []
 
             for i, line in enumerate(lines):
-                if line.strip() == f"## {column}":
+                s = line.strip()
+                if s == f"## {column}":
                     in_column = True
                     continue
-                elif line.strip().startswith("## ") and in_column:
+                if s.startswith("## ") and in_column:
                     break
 
-                if in_column and title in line and line.strip().startswith("*"):
-                    lines.pop(i)
-                    task_found = True
-                    break
+                if in_column:
+                    parsed = _parse_task_title(line)
+                    if parsed is not None:
+                        seen_titles.append(parsed)
+                        if parsed == title:
+                            task_index = i
+                            break
 
-            if not task_found:
+            if task_index is None:
+                suggestions = difflib.get_close_matches(title, seen_titles, n=3, cutoff=0.6)
+                if suggestions:
+                    hint = ", ".join(repr(s) for s in suggestions)
+                    return (f"Error: Task '{title}' not found in {column}. "
+                            f"Did you mean: {hint}?")
                 return f"Error: Task '{title}' not found in {column}"
+
+            lines.pop(task_index)
 
             # R1: atomic markdown write (temp + fsync + os.replace).
             try:
@@ -279,15 +326,10 @@ def register_tools(server: MCPServer):
                 current_column = line.strip()[3:].strip()
                 if current_column not in tasks:
                     tasks[current_column] = []
-            elif current_column and line.strip().startswith("*"):
-                # Extract task title (remove checkbox and description)
-                task_text = line.strip()[1:].strip()  # Remove *
-                if task_text.startswith("[ ]") or task_text.startswith("[x]"):
-                    task_text = task_text[3:].strip()  # Remove checkbox
-                # Remove description if present
-                if " - " in task_text:
-                    task_text = task_text.split(" - ")[0].strip()
-                tasks[current_column].append(task_text)
+            elif current_column:
+                parsed = _parse_task_title(line)
+                if parsed is not None:
+                    tasks[current_column].append(parsed)
         
         # Filter by column if specified
         if column:
