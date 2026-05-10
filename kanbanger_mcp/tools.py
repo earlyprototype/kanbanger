@@ -17,6 +17,7 @@ from mcp_use.server import MCPServer
 
 from kanban_io import (
     atomic_write_text,
+    discover_columns,
     kanban_lock,
     parse_task_title_with_description as _parse_task_title_with_description,
 )
@@ -173,15 +174,18 @@ def register_tools(server: MCPServer):
     def add_task(title: str, column: str = "TODO", description: str = "") -> str:
         """
         Add a new task to the kanban board.
-        
+
         Args:
             title: Task title (required, should be concise and action-oriented)
-            column: Target column - must be one of: BACKLOG, TODO, DOING, DONE (default: TODO)
+            column: Target column - any column present in the board's
+                ``## section`` headers (default: TODO). The set is whatever
+                the board declares; common values are BACKLOG, TODO, DOING,
+                REVIEW, DONE.
             description: Optional task description for additional context
-        
+
         Returns:
             Success message or error description
-        
+
         Example:
             add_task("Implement user authentication", "TODO", "Add JWT-based auth system")
         """
@@ -194,8 +198,11 @@ def register_tools(server: MCPServer):
                 kanban_path=kanban_path,
             )
 
-        # Validate column
-        valid_columns = ["BACKLOG", "TODO", "DOING", "DONE"]
+        # column-config: validate against the board's actual columns,
+        # not a hardcoded whitelist. A board with REVIEW (or any custom
+        # column) is fully operable via the MCP tools; the parser was
+        # already permissive here, this aligns the validator with it.
+        valid_columns = discover_columns(get_workspace())
         if column not in valid_columns:
             return _error(
                 ERROR_INVALID_COLUMN,
@@ -261,18 +268,18 @@ def register_tools(server: MCPServer):
     def move_task(title: str, from_column: str, to_column: str) -> str:
         """
         Move a task from one column to another.
-        
+
         Args:
             title: Exact title of the task to move
-            from_column: Source column (BACKLOG, TODO, DOING, DONE)
-            to_column: Destination column (BACKLOG, TODO, DOING, DONE)
-        
+            from_column: Source column — any column present in the board
+            to_column: Destination column — any column present in the board
+
         Returns:
             Success message or error description
-        
+
         Example:
             move_task("Implement user authentication", "TODO", "DOING")
-        
+
         Note:
             - Task title must match exactly
             - Moving to DONE automatically marks task as completed [x]
@@ -287,8 +294,9 @@ def register_tools(server: MCPServer):
                 kanban_path=kanban_path,
             )
 
-        # Validate columns
-        valid_columns = ["BACKLOG", "TODO", "DOING", "DONE"]
+        # column-config: validate both columns against the board's
+        # actual columns rather than a hardcoded whitelist.
+        valid_columns = discover_columns(get_workspace())
         if from_column not in valid_columns:
             return _error(
                 ERROR_INVALID_COLUMN,
@@ -392,17 +400,17 @@ def register_tools(server: MCPServer):
     def delete_task(title: str, column: str) -> str:
         """
         Delete a task from the kanban board.
-        
+
         Args:
             title: Exact title of the task to delete
-            column: Column containing the task (BACKLOG, TODO, DOING, DONE)
-        
+            column: Column containing the task — any column present in the board
+
         Returns:
             Success message or error description
-        
+
         Example:
             delete_task("Old deprecated feature", "BACKLOG")
-        
+
         Warning:
             This permanently removes the task from the local markdown file.
             Consider moving to DONE instead of deleting for record keeping.
@@ -414,6 +422,18 @@ def register_tools(server: MCPServer):
                 ERROR_KANBAN_NOT_FOUND,
                 f"Kanban board not found at {kanban_path}",
                 kanban_path=kanban_path,
+            )
+
+        # column-config: fail fast with a structured invalid_column
+        # error if the caller asks for a column not on the board, rather
+        # than silently returning task_not_found from the search loop.
+        valid_columns = discover_columns(get_workspace())
+        if column not in valid_columns:
+            return _error(
+                ERROR_INVALID_COLUMN,
+                f"Invalid column '{column}'",
+                column=column,
+                valid_columns=valid_columns,
             )
 
         # R2: serialize mutations cross-process so concurrent writers can't lost-update.
@@ -564,12 +584,19 @@ def register_tools(server: MCPServer):
                     else:
                         tasks[current_column].append(title)
 
-        # Filter by column if specified
+        # Filter by column if specified. column-config: validate
+        # against the columns actually present on the board (the
+        # parser's source of truth) rather than silently returning an
+        # empty list for typos / made-up names.
         if column:
             if column in tasks:
                 return json.dumps({column: tasks[column]}, indent=2)
-            else:
-                return json.dumps({column: []}, indent=2)
+            return _error(
+                ERROR_INVALID_COLUMN,
+                f"Invalid column '{column}'",
+                column=column,
+                valid_columns=list(tasks.keys()),
+            )
 
         return json.dumps(tasks, indent=2)
     

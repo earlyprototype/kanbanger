@@ -20,6 +20,42 @@ from typing import Iterator, Optional, Tuple
 
 _LOCK_FILENAME = ".kanban.lock"
 _STATE_FILENAME = ".kanban.json"
+_KANBAN_FILENAME = "_kanban.md"
+
+
+def discover_columns(workspace: str) -> list:
+    """Return the column names from `_kanban.md` in document order.
+
+    column-config: single source of truth for "what columns exist on
+    this board." Reads the kanban file and yields each `## section`
+    header in the order they appear. The MCP tools' validation paths
+    consult this so a board with REVIEW (or any custom-named column)
+    can be added-to / moved-from / deleted-from without the validator
+    falsely rejecting it; resources.get_kanban_stats consults the same
+    helper to keep stats and validation aligned.
+
+    The board is the only configuration — there's no separate column-
+    config file. The "configurable column set" feature (required vs
+    optional, transition gates, etc.) lives in the Phase 1
+    coordination-primitives bundle. This helper just makes validation
+    permissive in the same way the parser already is.
+
+    Returns an empty list if the file is missing; callers handle
+    that by returning their own structured error.
+    """
+    kanban_path = os.path.join(workspace, _KANBAN_FILENAME)
+    if not os.path.exists(kanban_path):
+        return []
+    with open(kanban_path, "r", encoding="utf-8") as f:
+        content = f.read()
+    columns = []
+    for line in content.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            name = stripped[3:].strip()
+            if name and name not in columns:
+                columns.append(name)
+    return columns
 
 
 def parse_task_title_with_description(

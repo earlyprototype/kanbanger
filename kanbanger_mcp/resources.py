@@ -9,6 +9,8 @@ import json
 from pathlib import Path
 from mcp_use.server import MCPServer
 
+from kanban_io import discover_columns
+
 
 def get_workspace() -> str:
     """Get the current workspace directory.
@@ -73,21 +75,24 @@ def register_resources(server: MCPServer):
         
         # D5: discover columns dynamically from the markdown rather
         # than the previous hardcoded {BACKLOG, TODO, DOING, DONE}
-        # initializer. Mirrors the parser in tools.list_tasks so any
-        # column the parser accepts (REVIEW, custom names) is counted
-        # in both per-column figures and the total. Convenience aliases
-        # (in_progress / completed / pending) stay for back-compat
-        # callers but tolerate missing columns via .get(..., 0).
-        lines = content.split('\n')
-        stats: dict = {}
+        # initializer. column-config: column discovery is hoisted to
+        # `kanban_io.discover_columns` so this resource and the
+        # validation paths in `tools.py` share a single source of
+        # truth. Convenience aliases (in_progress / completed /
+        # pending) stay for back-compat callers but tolerate missing
+        # columns via .get(..., 0).
+        columns = discover_columns(get_workspace())
+        stats: dict = {col: 0 for col in columns}
+        column_set = set(columns)
         current_column = None
 
-        for line in lines:
-            if line.strip().startswith("## "):
-                current_column = line.strip()[3:].strip()
-                stats.setdefault(current_column, 0)
-            elif current_column and line.strip().startswith("*"):
-                stats[current_column] = stats.get(current_column, 0) + 1
+        for line in content.split('\n'):
+            stripped = line.strip()
+            if stripped.startswith("## "):
+                name = stripped[3:].strip()
+                current_column = name if name in column_set else None
+            elif current_column and stripped.startswith("*"):
+                stats[current_column] += 1
 
         stats["total"] = sum(v for v in stats.values() if isinstance(v, int))
         stats["in_progress"] = stats.get("DOING", 0)
