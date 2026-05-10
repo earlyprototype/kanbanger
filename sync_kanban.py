@@ -33,6 +33,29 @@ GITHUB_API = "https://api.github.com/graphql"
 SCHEMA_VERSION = 1
 
 
+# E1: typed exceptions raised by the sync_kanban library so callers
+# (CLI entry-point, MCP subprocess wrapper, future direct importers)
+# can distinguish failure categories instead of pattern-matching on
+# stdout. Library code raises; CLI catches at __main__.
+class KanbangerError(Exception):
+    """Base class for all kanbanger library errors."""
+
+
+class GitHubAPIError(KanbangerError):
+    """A GitHub GraphQL/HTTP call failed: HTTP non-200, GraphQL
+    error array, or a missing field that the GraphQL contract
+    promised."""
+
+
+class ProjectNotFoundError(KanbangerError):
+    """No GitHub Project matched the requested repo/number."""
+
+
+class ConfigurationError(KanbangerError):
+    """Required configuration is missing or invalid: env var, file
+    path, or runtime dependency."""
+
+
 class LocalBoard:
     """Handles parsing of markdown kanban files."""
     
@@ -231,8 +254,9 @@ class GitHubClient:
             import requests
             self.requests = requests
         except ImportError:
-            print("Error: requests not installed. Run: pip install requests")
-            sys.exit(1)
+            raise ConfigurationError(
+                "requests not installed. Run: pip install requests"
+            )
     
     def _query(self, query: str, variables: Dict) -> Dict:
         """Execute a GraphQL query."""
@@ -243,16 +267,18 @@ class GitHubClient:
         )
         
         if response.status_code != 200:
-            print(f"Error: GitHub API returned status {response.status_code}")
-            print(response.text)
-            sys.exit(1)
-        
+            raise GitHubAPIError(
+                f"GitHub API returned status {response.status_code}: "
+                f"{response.text}"
+            )
+
         data = response.json()
         if "errors" in data:
-            print(f"Error: GraphQL errors:")
-            for error in data["errors"]:
-                print(f"  - {error.get('message', str(error))}")
-            sys.exit(1)
+            details = "\n".join(
+                f"  - {error.get('message', str(error))}"
+                for error in data["errors"]
+            )
+            raise GitHubAPIError(f"GraphQL errors:\n{details}")
         
         return data
     
@@ -297,32 +323,33 @@ class GitHubClient:
         projects = repo["projectsV2"]["nodes"]
         
         if not projects:
-            print(f"Error: No projects found linked to {owner}/{repo_name}")
-            sys.exit(1)
-        
+            raise ProjectNotFoundError(
+                f"No projects found linked to {owner}/{repo_name}"
+            )
+
         # Find the right project
         project = None
         if project_number:
             project = next((p for p in projects if p["number"] == project_number), None)
             if not project:
-                print(f"Error: Project #{project_number} not found")
-                sys.exit(1)
+                raise ProjectNotFoundError(
+                    f"Project #{project_number} not found"
+                )
         else:
             project = projects[0]
             print(f"Info: Using project #{project['number']}: {project['title']}")
-        
+
         project_id = project["id"]
-        
+
         # Find the Status field
         status_field = None
         for field in project["fields"]["nodes"]:
             if field and field.get("name") in ["Status", "status"]:
                 status_field = field
                 break
-        
+
         if not status_field:
-            print("Error: No 'Status' field found in project")
-            sys.exit(1)
+            raise GitHubAPIError("No 'Status' field found in project")
         
         status_field_id = status_field["id"]
         status_options = {opt["name"]: opt["id"] for opt in status_field["options"]}
@@ -592,12 +619,12 @@ def main():
 
     # Fail-fast on missing repo BEFORE any work, including --dry-run.
     if not args.repo:
-        print("Error: --repo or GITHUB_REPO environment variable required", file=sys.stderr)
-        sys.exit(1)
+        raise ConfigurationError(
+            "--repo or GITHUB_REPO environment variable required"
+        )
 
     if not os.path.exists(args.kanban_file):
-        print(f"Error: File not found: {args.kanban_file}")
-        sys.exit(1)
+        raise ConfigurationError(f"File not found: {args.kanban_file}")
 
     # Initialize components
     board = LocalBoard(args.kanban_file)
@@ -615,8 +642,7 @@ def main():
 
     token = os.environ.get('GITHUB_TOKEN')
     if not token:
-        print("Error: GITHUB_TOKEN environment variable not set")
-        sys.exit(1)
+        raise ConfigurationError("GITHUB_TOKEN environment variable not set")
     
     state = StateManager(args.kanban_file)
     client = GitHubClient(token)
@@ -626,8 +652,17 @@ def main():
 
 
 if __name__ == "__main__":
+    # E1: catch typed library errors and present them with the same
+    # 'Error: <message>' shape callers used to print directly. Same
+    # exit code (1), same human-facing text; messages now uniformly
+    # land on stderr (was a mix of stdout + stderr previously).
+    # Other exceptions propagate with their traceback — those are bugs.
     try:
-        main()
+        try:
+            main()
+        except KanbangerError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
     finally:
         # R11: flush before exit so the parent sees a clean EOF on its pipes.
         try:
