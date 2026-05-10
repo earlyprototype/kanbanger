@@ -5,11 +5,80 @@ Read-only data that LLMs can access for context and awareness.
 """
 
 import os
+import sys
 import json
+import time
+import urllib.request
+import urllib.error
 from pathlib import Path
 from mcp_use.server import MCPServer
 
 from kanban_io import discover_columns
+
+
+# O3 reachability cache: maps token-suffix (last 6 chars; never the
+# full token) to (expiry_timestamp, reachable_bool). Module-level so
+# repeated `kanban://config` calls within the TTL don't hammer the
+# GraphQL endpoint. Keying on suffix lets a token rotation invalidate
+# the cache naturally (different suffix → different key).
+_REACHABLE_CACHE: dict = {}
+_REACHABLE_TTL_SEC = 30.0
+_REACHABLE_TIMEOUT_SEC = 5.0
+_GITHUB_GRAPHQL_URL = "https://api.github.com/graphql"
+_REACHABLE_QUERY = '{"query":"{ viewer { login } }"}'
+
+
+def _check_github_reachable(token: str) -> bool:
+    """Single `viewer { login }` GraphQL ping with 30s memoization.
+
+    O3 reachability sub-item: the env-resolution half of O3 (commit
+    `ddfe741`) reports whether a token is configured; this helper
+    answers the harder question of whether the configured token can
+    actually reach GitHub. Returns True on a successful viewer query
+    (HTTP 200 + non-null `data.viewer`); False on auth failure,
+    network failure, timeout, or any non-200. Caller must handle
+    `token is None / empty` itself — we don't ping with an empty
+    token.
+
+    Cache keyed by the last 6 chars of the token (never logged)
+    keeps repeated `kanban://config` calls cheap; TTL is intentionally
+    short (30s) so a freshly-rotated token reflects within the same
+    interaction. The 5s connect/read timeout keeps a flaky network
+    from blocking resource calls.
+    """
+    cache_key = token[-6:] if len(token) >= 6 else token
+    now = time.time()
+    cached = _REACHABLE_CACHE.get(cache_key)
+    if cached is not None and cached[0] > now:
+        return cached[1]
+
+    req = urllib.request.Request(
+        _GITHUB_GRAPHQL_URL,
+        data=_REACHABLE_QUERY.encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "kanbanger-mcp",
+        },
+        method="POST",
+    )
+    reachable = False
+    try:
+        with urllib.request.urlopen(req, timeout=_REACHABLE_TIMEOUT_SEC) as resp:
+            if resp.status == 200:
+                payload = json.loads(resp.read().decode("utf-8"))
+                viewer = payload.get("data", {}).get("viewer") if isinstance(payload, dict) else None
+                reachable = viewer is not None
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        print(
+            f"Warning: github_reachable ping failed: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        reachable = False
+
+    _REACHABLE_CACHE[cache_key] = (now + _REACHABLE_TTL_SEC, reachable)
+    return reachable
 
 
 def get_workspace() -> str:
@@ -170,13 +239,21 @@ def register_resources(server: MCPServer):
         def _runtime_value(name: str, default: str) -> str:
             return os.getenv(name) or dotenv_overlay.get(name) or default
 
-        token_present = bool(os.getenv("GITHUB_TOKEN") or dotenv_overlay.get("GITHUB_TOKEN"))
+        token = os.getenv("GITHUB_TOKEN") or dotenv_overlay.get("GITHUB_TOKEN")
+        token_present = bool(token)
+
+        # O3 reachability sub-item: ping GitHub iff a token is
+        # actually configured. None when not configured (no point
+        # pinging with no token); True on a successful `viewer`
+        # query; False on any failure. Cached 30s.
+        github_reachable = _check_github_reachable(token) if token else None
 
         config = {
             "workspace": get_workspace(),
             "kanban_file": get_kanban_path(),
             "kanban_exists": os.path.exists(get_kanban_path()),
             "github_token_set": token_present,
+            "github_reachable": github_reachable,
             "github_repo": _runtime_value("GITHUB_REPO", "not set"),
             "github_project_number": _runtime_value("GITHUB_PROJECT_NUMBER", "auto-detect"),
             "env_file": env_path,
