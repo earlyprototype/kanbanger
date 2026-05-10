@@ -444,11 +444,15 @@ class Syncer:
                 print(f"  [CREATE] {title} => {desired_status}")
                 item_id = self.client.create_draft_issue(project_id, title)
                 self.state.update_task(title, item_id, desired_status)
-                
+                # D7: persist mapping immediately after create so a crash
+                # before the next iteration cannot orphan the GH item.
+                # Atomic+locked save (R1+R2+D1) makes per-item saves cheap.
+                self.state.save()
+
                 # Set initial status
                 if desired_status in self.status_options:
                     self.client.update_item_status(
-                        project_id, item_id, status_field_id, 
+                        project_id, item_id, status_field_id,
                         self.status_options[desired_status]
                     )
             elif stored_status != desired_status:
@@ -460,12 +464,15 @@ class Syncer:
                         self.status_options[desired_status]
                     )
                 self.state.update_task(title, item_id, desired_status)
+                # D7: persist after each update so partial-completion state
+                # survives crashes mid-loop.
+                self.state.save()
             else:
                 # No change
                 print(f"  [OK] {title}")
-            
+
             seen_remote.add(title)
-        
+
         # Archive tasks that were removed from markdown
         for title in list(self.state.state["tasks"].keys()):
             if title not in local_flat:
@@ -473,7 +480,13 @@ class Syncer:
                 print(f"  [ARCHIVE] {title}")
                 self.client.archive_item(project_id, item_id)
                 self.state.remove_task(title)
-        
+                # D7: persist after each archive so the local state matches
+                # the GH-side archive even if the loop is interrupted.
+                self.state.save()
+
+        # End-of-loop save remains as a defensive flush; a no-op when
+        # per-item saves already covered every mutation, but cheap and
+        # keeps the existing "Sync complete" semantics intact.
         print(f"\nSaving state...")
         self.state.save()
         print(f"Sync complete!")
