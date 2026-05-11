@@ -887,3 +887,111 @@ def register_tools(server: MCPServer):
 
         return _ok(task={"title": title, "from_column": "DOING",
                          "to_column": "REVIEW"})
+
+    @server.tool()
+    def approve_done(title: str) -> str:
+        """
+        Approve a task in REVIEW, moving it to DONE.
+
+        Args:
+            title: Exact title of the task currently in REVIEW.
+
+        Returns:
+            JSON string. On success:
+                {"success": true,
+                 "task": {"title": str, "from_column": "REVIEW",
+                          "to_column": "DONE"}}
+            On error: {"success": false, "error_code": str,
+                       "message": str, "context": {...}}
+
+        Example:
+            approve_done("Implement user authentication")
+
+        Workflow:
+            This is the gate-holder's side of the REVIEW primitive. The
+            worker proposed completion via propose_done(title); the
+            reviewer (human or PM) confirms the work is acceptable and
+            approves with this tool.
+
+            If the work needs changes, use reject_review(title, reason)
+            instead.
+
+        Errors:
+            - kanban_not_found: _kanban.md missing in workspace
+            - task_not_found: title doesn't match any task
+            - invalid_state: task exists but is not in REVIEW
+            - write_failed: atomic write failed
+        """
+        kanban_path = get_kanban_path()
+        if not os.path.exists(kanban_path):
+            return _error(
+                ERROR_KANBAN_NOT_FOUND,
+                f"Kanban board not found at {kanban_path}",
+                kanban_path=kanban_path,
+            )
+
+        with kanban_lock(get_workspace()):
+            try:
+                with open(kanban_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+            except Exception as e:
+                return _error(
+                    ERROR_READ_FAILED,
+                    f"Error reading kanban board: {str(e)}",
+                )
+
+            lines = content.split('\n')
+
+            current_column = None
+            found_in_column = None
+            found_index = None
+            found_line = None
+            for i, line in enumerate(lines):
+                s = line.strip()
+                if s.startswith("## "):
+                    current_column = s[3:].strip()
+                    continue
+                if current_column is None:
+                    continue
+                parsed = _parse_task_title(line)
+                if parsed is not None and parsed == title:
+                    found_in_column = current_column
+                    found_index = i
+                    found_line = line
+                    break
+
+            if found_in_column is None:
+                return _error(
+                    ERROR_TASK_NOT_FOUND,
+                    f"Task '{title}' not found in any column",
+                    title=title,
+                )
+            if found_in_column != "REVIEW":
+                return _error(
+                    ERROR_INVALID_STATE,
+                    f"Task '{title}' is in {found_in_column}, not REVIEW. "
+                    f"approve_done moves REVIEW -> DONE only.",
+                    title=title,
+                    current_column=found_in_column,
+                    expected_column="REVIEW",
+                )
+
+            # Flip checkbox to [x] (move_task convention for DONE) and
+            # insert after the `## DONE` header.
+            lines.pop(found_index)
+            done_line = found_line.replace("[ ]", "[x]")
+            for i, line in enumerate(lines):
+                if line.strip() == "## DONE":
+                    lines.insert(i + 1, done_line)
+                    break
+
+            try:
+                atomic_write_text(kanban_path, '\n'.join(lines))
+            except Exception as e:
+                return _error(
+                    ERROR_WRITE_FAILED,
+                    f"Error writing kanban board: {str(e)}",
+                )
+
+        return _ok(task={"title": title, "from_column": "REVIEW",
+                         "to_column": "DONE"})
