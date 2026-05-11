@@ -150,6 +150,85 @@ Let's review the current kanban board and plan today's work.
 Let's start by checking the current board state:"""
     
     @server.prompt(
+        name="review_gate_etiquette",
+        title="REVIEW Gate Etiquette",
+        description="Teach AI agents the propose_done / approve_done / "
+                    "reject_review contract"
+    )
+    def review_gate_etiquette_prompt() -> str:
+        """Inject REVIEW-gate etiquette into LLM context."""
+        return """# REVIEW Gate Etiquette
+
+This board uses a REVIEW column as a gate between AI-completed work
+and DONE. REVIEW is part of the canonical 5-column schema (BACKLOG
+-> TODO -> DOING -> REVIEW -> DONE) — the platform guarantees it
+exists on every board. The contract has three primitives:
+
+## When you finish a task
+
+Call `propose_done(title)` to move the task from DOING to REVIEW.
+This signals "I think this is done; please review."
+
+Do NOT call `move_task(title, from_column="DOING", to_column="DONE")`
+directly. That path bypasses the gate and is reserved for the
+board's human or PM reviewer via `approve_done` after they have
+reviewed the work.
+
+## What happens next
+
+The reviewer (human or PM session) inspects the work and calls
+either:
+
+- `approve_done(title)` — the work is acceptable; the task moves
+  from REVIEW to DONE.
+- `reject_review(title, reason)` — the work needs changes. Pattern
+  C two-entry rejection:
+  1. The original task moves REVIEW -> DONE with a REJECTED
+     annotation in its description: `[x] <title> - REJECTED:
+     <reason>; rework: Rework: <title>`. This preserves the
+     shipped-history.
+  2. A NEW task `Rework: <title>` is created at the top of TODO
+     with description `Reason: <reason>; Original task: <title>`.
+     This new task is the actionable work going forward.
+
+## When you receive a rejection
+
+A new task titled `Rework: <your original title>` will appear at
+the top of TODO. Its description carries the reviewer's reason
+and a pointer back to the original task. The original task is
+now in DONE (with REJECTED annotation) — read it for context, but
+do your work against the Rework task. When the Rework is ready
+for re-review, call `propose_done("Rework: <original title>")` —
+the Rework task is the unit being reviewed this time.
+
+## Why the gate exists
+
+The gate enforces a single principle: AI-completed work is not
+durable until a human or PM has acknowledged it. The REVIEW column
+is the visible queue of "work awaiting acknowledgement." Skipping
+the gate produces silent drift between what the board says is done
+and what has actually been validated.
+
+The `Rework:` prefix on rejected work IS the priority signal —
+no separate priority column or flag needed. Rejected work is
+visible, actionable, and linked back to the shipped record.
+
+## Quick reference
+
+- Finish a task -> `propose_done(title)`
+- Reviewer approves -> `approve_done(title)`
+- Reviewer rejects -> `reject_review(title, reason)` (reason
+  required — empty rejects fail with `missing_reason`)
+- After rejection, look in TODO for `Rework: <your title>` — that
+  is your next task. The original lives in DONE with the REJECTED
+  annotation for reference.
+- Never -> `move_task(title, "DOING", "DONE")` directly
+
+This is the contract. Follow it without asking the user about
+DONE markings — the platform's canonical schema enforces the gate
+for you."""
+
+    @server.prompt(
         name="github_sync_check",
         title="GitHub Sync Reminder",
         description="Remind to sync board with GitHub Projects"
