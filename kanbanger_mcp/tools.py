@@ -46,6 +46,10 @@ ERROR_SYNC_TIMEOUT = "sync_timeout"
 ERROR_GITHUB_API = "github_api_error"
 ERROR_PROJECT_NOT_FOUND = "project_not_found"
 ERROR_CONFIGURATION = "configuration_error"
+# Review-gate primitives use this for "task exists but is in the wrong
+# column for the operation." Used by propose_done, approve_done, and
+# reject_review.
+ERROR_INVALID_STATE = "invalid_state"
 
 
 def _error(code: str, message: str, **context) -> str:
@@ -64,6 +68,19 @@ def _error(code: str, message: str, **context) -> str:
     if context:
         payload["context"] = context
     return json.dumps(payload, indent=2)
+
+
+def _ok(**payload) -> str:
+    """Render a structured MCP tool success return as JSON.
+
+    Mirrors `_error`'s shape with `success: True`. Used by the
+    review-gate primitives where a structured return (task, transition,
+    optional reason) is more useful than a plain success string. The
+    audit-era tools (add_task, move_task, delete_task) keep their
+    plain-string success returns to avoid client churn; only the new
+    coordination primitives use this richer shape.
+    """
+    return json.dumps({"success": True, **payload}, indent=2)
 
 
 def _classify_sync_stderr(stderr: str) -> str:
@@ -760,3 +777,113 @@ def register_tools(server: MCPServer):
             return json.dumps({
                 "error": f"Error reading sync state: {str(e)}"
             }, indent=2)
+
+    @server.tool()
+    def propose_done(title: str) -> str:
+        """
+        Propose a task as done, moving it from DOING to REVIEW.
+
+        Args:
+            title: Exact title of the task currently in DOING.
+
+        Returns:
+            JSON string. On success:
+                {"success": true,
+                 "task": {"title": str, "from_column": "DOING",
+                          "to_column": "REVIEW"}}
+            On error: {"success": false, "error_code": str,
+                       "message": str, "context": {...}}
+
+        Example:
+            propose_done("Implement user authentication")
+
+        Workflow:
+            Workers call this when finishing a task. The board's human
+            or PM reviewer then approves with approve_done(title) or
+            sends back with reject_review(title, reason).
+
+            Do NOT call move_task(title, "DOING", "DONE") directly. The
+            direct path bypasses the review gate; approve_done is the
+            only path that lands work in DONE.
+
+        Errors:
+            - kanban_not_found: _kanban.md missing in workspace
+            - task_not_found: title doesn't match any task
+            - invalid_state: task exists but is not in DOING (current
+              column reported in context)
+            - write_failed: atomic write failed
+        """
+        kanban_path = get_kanban_path()
+        if not os.path.exists(kanban_path):
+            return _error(
+                ERROR_KANBAN_NOT_FOUND,
+                f"Kanban board not found at {kanban_path}",
+                kanban_path=kanban_path,
+            )
+
+        with kanban_lock(get_workspace()):
+            try:
+                with open(kanban_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+            except Exception as e:
+                return _error(
+                    ERROR_READ_FAILED,
+                    f"Error reading kanban board: {str(e)}",
+                )
+
+            lines = content.split('\n')
+
+            # Walk every column. Record where (if anywhere) the task lives.
+            current_column = None
+            found_in_column = None
+            found_index = None
+            found_line = None
+            for i, line in enumerate(lines):
+                s = line.strip()
+                if s.startswith("## "):
+                    current_column = s[3:].strip()
+                    continue
+                if current_column is None:
+                    continue
+                parsed = _parse_task_title(line)
+                if parsed is not None and parsed == title:
+                    found_in_column = current_column
+                    found_index = i
+                    found_line = line
+                    break
+
+            if found_in_column is None:
+                return _error(
+                    ERROR_TASK_NOT_FOUND,
+                    f"Task '{title}' not found in any column",
+                    title=title,
+                )
+            if found_in_column != "DOING":
+                return _error(
+                    ERROR_INVALID_STATE,
+                    f"Task '{title}' is in {found_in_column}, not DOING. "
+                    f"propose_done moves DOING -> REVIEW only.",
+                    title=title,
+                    current_column=found_in_column,
+                    expected_column="DOING",
+                )
+
+            # Move from DOING to REVIEW (insert immediately after the
+            # `## REVIEW` header). Item 1.5's auto-migration guarantees
+            # REVIEW is on the board.
+            lines.pop(found_index)
+            for i, line in enumerate(lines):
+                if line.strip() == "## REVIEW":
+                    lines.insert(i + 1, found_line)
+                    break
+
+            try:
+                atomic_write_text(kanban_path, '\n'.join(lines))
+            except Exception as e:
+                return _error(
+                    ERROR_WRITE_FAILED,
+                    f"Error writing kanban board: {str(e)}",
+                )
+
+        return _ok(task={"title": title, "from_column": "DOING",
+                         "to_column": "REVIEW"})
