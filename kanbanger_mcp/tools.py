@@ -53,6 +53,10 @@ ERROR_INVALID_STATE = "invalid_state"
 # reject_review demands a non-empty reason — empty rejections would
 # create a Rework task with no actionable context.
 ERROR_MISSING_REASON = "missing_reason"
+# Bundle 1b: move_task -> DONE is reserved for the REVIEW-gate happy path.
+# Direct calls from any non-REVIEW column return this code; the canonical
+# path is propose_done(title) followed by approve_done(title).
+ERROR_GATE_VIOLATION = "gate_violation"
 
 
 def _error(code: str, message: str, **context) -> str:
@@ -159,6 +163,46 @@ def _format_rework_entries(title: str, reason: str) -> Tuple[str, str]:
         f"Reason: {reason}; Original task: {title}"
     )
     return done_line, rework_line
+
+
+def _find_task_column(
+    lines: list,
+    title: str,
+) -> Tuple[Optional[str], Optional[int], Optional[str]]:
+    """Walk the board and locate the task by exact-title equality.
+
+    Iterates `lines` looking for `## <column>` headers and task entries.
+    For each task line, parses the title via `_parse_task_title` and
+    compares for equality. Returns the first match in document order
+    (BACKLOG -> TODO -> DOING -> REVIEW -> DONE per the canonical
+    5-column schema).
+
+    Args:
+        lines: kanban file split on '\n' (typical caller pattern).
+        title: exact title to locate.
+
+    Returns:
+        (column_name, line_index, line_text) if found.
+        (None, None, None) if no match anywhere on the board.
+
+    Behavior matches the inline walks in propose_done / approve_done /
+    reject_review (Bundle 1). First match in document order wins -- on
+    a board with duplicate titles across columns, the earlier column
+    (in section order) is returned. Duplicate detection / dedup is a
+    separate concern (D4); this helper does not warn or reject.
+    """
+    current_column: Optional[str] = None
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s.startswith("## "):
+            current_column = s[3:].strip()
+            continue
+        if current_column is None:
+            continue
+        parsed = _parse_task_title(line)
+        if parsed is not None and parsed == title:
+            return current_column, i, line
+    return None, None, None
 
 
 def validate_task_title(title: str) -> Tuple[bool, Optional[str]]:
@@ -291,12 +335,33 @@ def register_tools(server: MCPServer):
             if description:
                 task_line += f" - {description}"
 
-            # Insert after column header
+            # Bug A: canonical-rebuild the target column. Append (not prepend),
+            # always pad header -> blank -> tasks -> blank. Existing tasks are
+            # preserved in order; stray blank lines inside the section are
+            # normalized away.
             lines = content.split('\n')
-            for i, line in enumerate(lines):
-                if line.strip() == column_header:
-                    lines.insert(i + 1, task_line)
-                    break
+            col_start_idx = next(
+                (i for i, line in enumerate(lines) if line.strip() == column_header),
+                None,
+            )
+            if col_start_idx is None:
+                return _error(
+                    ERROR_COLUMN_NOT_IN_BOARD,
+                    f"Column '{column}' not found in kanban board",
+                    column=column,
+                )
+            col_end_idx = next(
+                (i for i in range(col_start_idx + 1, len(lines))
+                 if lines[i].strip().startswith("## ")),
+                len(lines),
+            )
+            existing_tasks = [
+                ln for ln in lines[col_start_idx + 1:col_end_idx]
+                if ln.strip().startswith(("*", "-"))
+            ]
+            existing_tasks.append(task_line)
+            new_section = [""] + existing_tasks + [""]
+            lines = lines[:col_start_idx + 1] + new_section + lines[col_end_idx:]
 
             # R1: atomic markdown write (temp + fsync + os.replace).
             try:
@@ -355,6 +420,40 @@ def register_tools(server: MCPServer):
                 f"Invalid to_column '{to_column}'",
                 column=to_column,
                 valid_columns=valid_columns,
+            )
+
+        # Bundle 1b: REVIEW-gate enforcement. The only legitimate path to
+        # DONE is REVIEW -> DONE (via approve_done or reject_review's
+        # Pattern C). Any other from_column -> DONE transition bypasses
+        # the gate and is rejected with a structured error pointing the
+        # caller at the canonical primitives.
+        if to_column == "DONE" and from_column != "REVIEW":
+            # Best-effort state peek using _find_task_column (D9 helper) so
+            # the error context can name the actual current column rather
+            # than only the column the caller claimed. Outside the lock --
+            # this is a diagnostic-only read; the gate-violation is
+            # determined by the (from_column, to_column) pair, not by
+            # board state, so a racy read doesn't affect correctness.
+            actual_column = None
+            try:
+                with open(kanban_path, 'r', encoding='utf-8') as f:
+                    _peek_content = f.read()
+                _peek_lines = _peek_content.split('\n')
+                actual_column, _, _ = _find_task_column(_peek_lines, title)
+            except Exception:
+                actual_column = None
+            return _error(
+                ERROR_GATE_VIOLATION,
+                f"Direct move_task to DONE from {from_column} bypasses the "
+                f"REVIEW gate. The canonical path is propose_done(title) "
+                f"to move DOING -> REVIEW, then approve_done(title) to "
+                f"land in DONE. Use reject_review(title, reason) if the "
+                f"work needs rework.",
+                title=title,
+                from_column=from_column,
+                to_column=to_column,
+                actual_column=actual_column,
+                canonical_path=["propose_done", "approve_done"],
             )
 
         # R2: serialize mutations cross-process so concurrent writers can't lost-update.
@@ -538,6 +637,15 @@ def register_tools(server: MCPServer):
                 )
 
             lines.pop(task_index)
+            # Bug A round-trip: compact any consecutive blank lines created
+            # at the deletion point so add_task -> delete_task is a no-op
+            # on the markdown shape.
+            while (
+                0 < task_index < len(lines)
+                and lines[task_index].strip() == ""
+                and lines[task_index - 1].strip() == ""
+            ):
+                lines.pop(task_index)
 
             # R1: atomic markdown write (temp + fsync + os.replace).
             try:
@@ -861,24 +969,8 @@ def register_tools(server: MCPServer):
 
             lines = content.split('\n')
 
-            # Walk every column. Record where (if anywhere) the task lives.
-            current_column = None
-            found_in_column = None
-            found_index = None
-            found_line = None
-            for i, line in enumerate(lines):
-                s = line.strip()
-                if s.startswith("## "):
-                    current_column = s[3:].strip()
-                    continue
-                if current_column is None:
-                    continue
-                parsed = _parse_task_title(line)
-                if parsed is not None and parsed == title:
-                    found_in_column = current_column
-                    found_index = i
-                    found_line = line
-                    break
+            # D9: hoisted state-lookup helper (Bundle 1b item 1).
+            found_in_column, found_index, found_line = _find_task_column(lines, title)
 
             if found_in_column is None:
                 return _error(
@@ -970,23 +1062,8 @@ def register_tools(server: MCPServer):
 
             lines = content.split('\n')
 
-            current_column = None
-            found_in_column = None
-            found_index = None
-            found_line = None
-            for i, line in enumerate(lines):
-                s = line.strip()
-                if s.startswith("## "):
-                    current_column = s[3:].strip()
-                    continue
-                if current_column is None:
-                    continue
-                parsed = _parse_task_title(line)
-                if parsed is not None and parsed == title:
-                    found_in_column = current_column
-                    found_index = i
-                    found_line = line
-                    break
+            # D9: hoisted state-lookup helper (Bundle 1b item 1).
+            found_in_column, found_index, found_line = _find_task_column(lines, title)
 
             if found_in_column is None:
                 return _error(
@@ -1099,21 +1176,10 @@ def register_tools(server: MCPServer):
 
             lines = content.split('\n')
 
-            current_column = None
-            found_in_column = None
-            found_index = None
-            for i, line in enumerate(lines):
-                s = line.strip()
-                if s.startswith("## "):
-                    current_column = s[3:].strip()
-                    continue
-                if current_column is None:
-                    continue
-                parsed = _parse_task_title(line)
-                if parsed is not None and parsed == title:
-                    found_in_column = current_column
-                    found_index = i
-                    break
+            # D9: hoisted state-lookup helper (Bundle 1b item 1). reject_review
+            # discards the line text -- _format_rework_entries generates fresh
+            # lines from the title rather than reusing the source line.
+            found_in_column, found_index, _ = _find_task_column(lines, title)
 
             if found_in_column is None:
                 return _error(
@@ -1130,6 +1196,31 @@ def register_tools(server: MCPServer):
                     title=title,
                     current_column=found_in_column,
                     expected_column="REVIEW",
+                )
+
+            # S7: Re-validate the Rework title against the same rules add_task
+            # applies. Without this, an original title near the 500-char cap
+            # can produce a Rework title that exceeds the cap (or otherwise
+            # violates the title-validation rules) once the "Rework: " prefix
+            # is prepended. Defense-in-depth against future rule changes too.
+            # Atomic property preserved -- no lines.pop / lines.insert has run
+            # yet, so the board is untouched and the original stays in REVIEW.
+            rework_title = f"Rework: {title}"
+            ok, err = validate_task_title(rework_title)
+            if not ok:
+                return _error(
+                    ERROR_INVALID_TITLE,
+                    f"Rework task title would be invalid: {err}. The original "
+                    f"title is too long (or contains a forbidden pattern) for "
+                    f"the 'Rework: ' prefix to be appended. Original title "
+                    f"length: {len(title)}; rework title length: "
+                    f"{len(rework_title)}; cap: {TITLE_MAX_LEN}.",
+                    title=title,
+                    rework_title=rework_title,
+                    original_title_length=len(title),
+                    rework_title_length=len(rework_title),
+                    max_length=TITLE_MAX_LEN,
+                    underlying_error=err,
                 )
 
             # Pattern C: two-entry atomic move.
