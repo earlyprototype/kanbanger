@@ -1,6 +1,7 @@
 # Kanbanger Development Kanban
 
 ## BACKLOG
+
 *   [ ] Enhanced CLI tool for direct task management (add, move, list without MCP)
 *   [ ] Add bidirectional sync (GitHub → Markdown)
 *   [ ] Support for multiple kanban files in one repo
@@ -10,18 +11,20 @@
 *   [ ] Support for custom field mappings beyond Status
 
 ## TODO
+
 *   [ ] Decide setup.py vs __version__ as version source-of-truth before PyPI publish (audit D10)
 
 ## DOING
 
-## DONE (Recent)
+## REVIEW
+
+## DONE
+
 *   [x] Bundle 1b: D9 helper extraction, move_task strict-gate, S7 Rework title revalidation
 *   [x] Bug A: add_task appends at column bottom; delete_task compacts blanks (byte-exact round-trip)
 *   [x] kanban-doctor preflight diagnostic (collision + version + schema_version checks)
 *   [x] Per-project venv install pattern (setup-venv.py + INSTALL.md; resolves kanbanger_mcp import collision)
 *   [x] Implement MCP server for LLM integration (resources, tools, prompts)
-
-## DONE
 *   [x] Consider PyPI publication
 *   [x] Set up GitHub Issues templates
 *   [x] Add CONTRIBUTING.md guide
