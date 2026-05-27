@@ -131,6 +131,9 @@ Create `_kanban.md` in your project root:
 ## DOING
 *   [ ] Currently active work
 
+## REVIEW
+*   [ ] Awaiting review before Done
+
 ## DONE
 *   [x] Completed tasks
 *   [x] Finished features
