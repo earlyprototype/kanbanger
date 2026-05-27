@@ -290,7 +290,7 @@ curl -H "Authorization: token YOUR_TOKEN" https://api.github.com/user
 2. **Check project exists:**
    - Go to your repo on GitHub
    - Verify Project is linked
-   - Check Status field has: Backlog, Todo, InProgress, Done
+   - Check Status field has: Backlog, Todo, InProgress, Review, Done
 
 ### Wrong Workspace
 
