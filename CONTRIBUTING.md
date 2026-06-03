@@ -280,23 +280,26 @@ We currently support only English. If you'd like to add translations:
 ## Project Structure
 
 ```
-kanbanger/
+kanbanger-partymix/
+├── kanbanger_mcp/              # MCP server (tools, resources, prompts, server)
 ├── sync_kanban.py              # Core sync engine
-├── setup_wizard.py             # Interactive setup
+├── kanban_io.py                # Shared board I/O + column discovery
+├── kanban_doctor.py            # Install / preflight diagnostics
+├── scripts/setup-venv.py       # Per-project venv installer
 ├── setup.py                    # Package config
 ├── git-hooks/                  # Git hook scripts
-├── .cursor/rules/              # Cursor AI enforcement
-├── kanbanger-dist/             # Distribution package
+├── kanbanger-dist/             # Distribution bundle (legacy)
 ├── _kanban.md                  # Our own kanban (dogfooding!)
 ├── README.md                   # Main documentation
-├── LLM_GUIDANCE.md            # AI assistant guide
-├── CHANGELOG.md               # Version history
-└── CONTRIBUTING.md            # This file
+├── INSTALL.md                  # Per-project install guide
+├── LLM_GUIDANCE.md             # AI assistant guide
+├── CHANGELOG.md                # Version history
+└── CONTRIBUTING.md             # This file
 ```
 
 **Key files to understand:**
-- `sync_kanban.py` - Main logic (parsing, syncing, GraphQL)
-- `setup_wizard.py` - Configuration and validation
+- `kanbanger_mcp/` - The MCP server (`tools.py`, `resources.py`, `prompts.py`, `server.py`)
+- `sync_kanban.py` - Sync logic (parsing, syncing, GraphQL)
 - `LLM_GUIDANCE.md` - How LLMs should interact with kanbans
 
 ## Architecture Overview

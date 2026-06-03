@@ -5,6 +5,22 @@ All notable changes to kanbanger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **First-run onboarding is now MCP-native.** The server `instructions` tell
+  the assistant to detect a missing board on first contact, ask the user
+  before setup, then run the local install and create the canonical 5-column
+  board (BACKLOG -> TODO -> DOING -> REVIEW -> DONE). The empty-board resource
+  template and the `kanban_awareness` prompt were aligned to 5 columns.
+
+### Removed
+- **Deprecated Cursor setup wizard.** `setup_wizard.py` and its
+  `kanban-sync-setup` console-script were removed (they wrote a Cursor
+  `.cursor/mcp.json` with `${workspaceFolder}` and a 4-column board). Use
+  `scripts/setup-venv.py` (the per-project install path) instead. README,
+  `docs/setup-flow.md`, and CONTRIBUTING were updated to match.
+
 ## v0.0.1 — 2026-05-08
 
 Fork from `earlyprototype/kanbanger` v2.1.0 as `kanbanger-partymix`.

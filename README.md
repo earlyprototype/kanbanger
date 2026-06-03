@@ -17,8 +17,8 @@ kanbanger-partymix is an **MCP (Model Context Protocol) server** that gives AI a
 
 ```mermaid
 graph LR
-    A[Install] --> B[Run setup]
-    B --> C[Create board]
+    A[Clone] --> B[setup-venv.py]
+    B --> C[AI creates board]
     C --> D[AI manages tasks]
     D --> E[Auto-sync to GitHub]
     
@@ -28,29 +28,31 @@ graph LR
     style E fill:#4CAF50
 ```
 
-### 1. Install
+### 1. Clone kanbanger-partymix (once)
 
 ```bash
 git clone https://github.com/earlyprototype/kanbanger-partymix.git
-cd kanbanger-partymix
-pip install -e ".[mcp]"
 ```
 
-### 2. Run Setup Wizard
+### 2. Provision your project (per project)
+
+From your project's root directory, run the per-project installer (adjust the
+path to wherever you cloned this repo):
 
 ```bash
-kanban-sync-setup
+python /path/to/kanbanger-partymix/scripts/setup-venv.py
 ```
 
-The wizard walks you through:
-1. GitHub token setup
-2. Repository connection
-3. Project selection
-4. **MCP server configuration** (recommended!)
+It creates a per-project `.venv`, installs kanbanger into it, and writes a
+`.mcp.json` pinned to that venv. See **[INSTALL.md](INSTALL.md)** for the full
+flow and how to supply GitHub credentials.
 
-### 3. Restart Your IDE
+### 3. Open a fresh Claude Code session
 
-Close and reopen Cursor (or your IDE) to load the MCP server.
+The kanbanger MCP server loads automatically. On first contact, if the project
+has no board yet, the assistant tells you Kanbanger isn't set up here and
+**asks** whether to set it up — say yes and it creates the canonical 5-column
+`_kanban.md` for you.
 
 ### 4. Use It!
 
@@ -145,42 +147,50 @@ Create `_kanban.md` in your project root:
 
 ### Per-Project Setup (Automatic)
 
-The setup wizard creates `.cursor/mcp.json`:
+`scripts/setup-venv.py` writes a `.mcp.json` in your project root, with the
+`command` pinned to that project's own `.venv` python:
 
 ```json
 {
     "mcpServers": {
         "kanbanger": {
-            "command": "python",
+            "command": "/abs/path/to/project/.venv/Scripts/python.exe",
             "args": ["-m", "kanbanger_mcp"],
             "env": {
-                "KANBANGER_WORKSPACE": "${workspaceFolder}",
-                "GITHUB_TOKEN": "${env:GITHUB_TOKEN}",
-                "GITHUB_REPO": "${env:GITHUB_REPO}",
-                "GITHUB_PROJECT_NUMBER": "${env:GITHUB_PROJECT_NUMBER}"
+                "KANBANGER_WORKSPACE": "${KANBANGER_WORKSPACE:-/abs/path/to/project}",
+                "GITHUB_TOKEN": "${GITHUB_TOKEN:-}",
+                "GITHUB_REPO": "${GITHUB_REPO:-}",
+                "GITHUB_PROJECT_NUMBER": "${GITHUB_PROJECT_NUMBER:-}",
+                "MCP_USE_ANONYMIZED_TELEMETRY": "false"
             }
         }
     }
 }
 ```
 
-**Key Features:**
-- `${workspaceFolder}` - Automatically resolves to your project path
-- `${env:VAR}` - Loads from environment (secrets stay in `.env`)
-- **Portable** - Same config works on any machine
-- **Per-project** - Each workspace independent
+**Key points:**
+- `${VAR:-default}` - Claude Code substitution syntax (not Cursor's `${env:VAR}`).
+- **Per-project venv** - the pinned `.venv` python avoids the `kanbanger_mcp`
+  import collision between installs (see [INSTALL.md](INSTALL.md)).
+- **Per-project** - each project gets its own independent `.mcp.json` + venv.
 
-### Environment Variables
+### GitHub credentials
 
-Create `.env` in your project (wizard does this):
+Don't hardcode secrets in `.mcp.json`. Provide real values via the project's
+gitignored `.claude/settings.local.json` `env` block, which Claude Code injects
+into the MCP server spawn:
 
-```env
-GITHUB_TOKEN=your_token_here
-GITHUB_REPO=owner/repo
-GITHUB_PROJECT_NUMBER=6  # optional, auto-detects
+```json
+{
+  "env": {
+    "GITHUB_TOKEN": "ghp_...",
+    "GITHUB_REPO": "owner/repo",
+    "GITHUB_PROJECT_NUMBER": "6"
+  }
+}
 ```
 
-**Get GitHub Token:**
+**Get a GitHub Token:**
 1. GitHub Settings → Developer Settings → Personal Access Tokens
 2. Generate new token (classic)
 3. Required scopes: `repo`, `project`, `read:org`
@@ -189,7 +199,8 @@ GITHUB_PROJECT_NUMBER=6  # optional, auto-detects
 
 | Command | Purpose |
 |---------|---------|
-| `kanban-sync-setup` | Run interactive setup wizard |
+| `python scripts/setup-venv.py` | Provision a project's venv + `.mcp.json` |
+| `kanban-doctor` | Preflight / diagnose a project's install |
 | `kanban-sync _kanban.md --dry-run` | Preview changes (safe) |
 | `kanban-sync _kanban.md` | Sync to GitHub |
 | `python -m kanbanger_mcp --help` | MCP server options |
@@ -225,25 +236,28 @@ AI: add_task("Task name", "TODO") ✅
 
 ## Multiple Projects
 
-Each project gets its own MCP server:
+Each project gets its own venv + MCP server:
 
 ```
 ProjectA/
-├── .cursor/mcp.json  # Uses ${workspaceFolder}
+├── .venv/                        # Project-local kanbanger install
+├── .mcp.json                     # Pinned to ProjectA/.venv
 ├── _kanban.md
-└── .env
+└── .claude/settings.local.json   # GitHub creds (gitignored)
 
 ProjectB/
-├── .cursor/mcp.json  # Same config, different workspace!
+├── .venv/
+├── .mcp.json                     # Pinned to ProjectB/.venv
 ├── _kanban.md
-└── .env
+└── .claude/settings.local.json
 ```
 
-**No path editing needed!** The `${workspaceFolder}` variable handles everything.
+Run `setup-venv.py` once per project — each `.mcp.json` is pinned to its own
+venv, so the projects stay fully isolated.
 
 ## Documentation
 
-- **[MCP Setup Guide](MCP_SETUP.md)** - Detailed MCP configuration for Cursor, Claude Desktop, VS Code
+- **[INSTALL.md](INSTALL.md)** - Per-project install (the authoritative setup guide)
 - **[Setup Flow Diagram](docs/setup-flow.md)** - Visual guide
 - **[LLM Guidance](LLM_GUIDANCE.md)** - How AI should use kanbanger
 - **[Contributing](CONTRIBUTING.md)** - How to contribute
@@ -264,20 +278,19 @@ cd git-hooks
 
 ### MCP Tools Not Showing
 
-1. **Check installation:**
+1. **Check the config exists:**
 ```bash
-pip show mcp-use
+ls .mcp.json
 ```
 
-2. **Check config exists:**
+2. **Check the venv resolves kanbanger:**
 ```bash
-ls .cursor/mcp.json
+.venv/Scripts/python -c "import kanbanger_mcp; print(kanbanger_mcp.__file__)"
 ```
 
-3. **Restart IDE** - Required after config changes
+3. **Restart Claude Code** - required after `.mcp.json` changes.
 
-4. **Check IDE logs:**
-   - Cursor: View → Output → Select "MCP"
+4. **Run the doctor** - `kanban-doctor` reports common install problems.
 
 ### Sync Failures
 
@@ -297,11 +310,11 @@ curl -H "Authorization: token YOUR_TOKEN" https://api.github.com/user
 
 ### Wrong Workspace
 
-If MCP server can't find `_kanban.md`:
+If the MCP server can't find `_kanban.md`:
 
-1. **Use local config** - `.cursor/mcp.json` in project root (not global)
-2. **Check workspace** - IDE opened correct folder?
-3. **Restart IDE** - Reload configuration
+1. **Use the project-local config** - `.mcp.json` in the project root (not global)
+2. **Check the workspace** - did Claude Code open the correct folder?
+3. **Restart Claude Code** - reloads configuration
 
 ## FAQ
 
@@ -357,12 +370,12 @@ kanban-sync _kanban.md
 
 ## Project Status
 
-- ✅ MCP Server (v2.1.0)
+- ✅ MCP Server
 - ✅ GitHub Projects V2 sync
-- ✅ Interactive setup wizard
+- ✅ Per-project venv install (`setup-venv.py`)
+- ✅ First-run onboarding (AI offers to create the board)
 - ✅ Git hooks
-- ✅ Cursor rules enforcement
-- ✅ Distribution package
+- ✅ `kanban-doctor` preflight
 - 🔄 Bidirectional sync (planned)
 - 🔄 Multiple kanban files (planned)
 - 🔄 VS Code extension (planned)
