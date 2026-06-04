@@ -72,3 +72,13 @@ def test_all_resources_registered(server: FastMCP):
 def test_all_prompts_registered(server: FastMCP):
     names = {p.name for p in asyncio.run(server.list_prompts())}
     assert names == EXPECTED_PROMPTS
+
+
+def test_server_advertises_kanbanger_version(server: FastMCP):
+    """serverInfo.version reports the kanbanger package version, not the mcp
+    SDK version. FastMCP has no version= param, so create_server() sets it on
+    the low-level server; this guards that parity (and catches it if a future
+    SDK rename removes the attribute)."""
+    from kanbanger_mcp import __version__
+
+    assert server._mcp_server.version == __version__

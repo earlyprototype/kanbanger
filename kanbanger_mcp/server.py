@@ -94,6 +94,13 @@ REVIEW -> DONE.
     register_resources(server)
     register_prompts(server)
     
+    # FastMCP has no version= parameter, so serverInfo.version would
+    # otherwise default to the mcp SDK version. Set it on the low-level
+    # server so the handshake keeps advertising the kanbanger package
+    # version -- parity with the previous MCPServer(version="2.1.0").
+    from . import __version__
+    server._mcp_server.version = __version__
+
     return server
 
 

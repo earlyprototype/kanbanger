@@ -51,9 +51,10 @@ parity is preserved: 9 tools, 4 resources, 5 prompts.
 - The `mcp` dependency is pinned `>=1.12.0,<2.0.0`: mcp v2 renames
   `FastMCP` -> `MCPServer` and moves transport parameters onto `run()`, which
   would break the current bootstrap. Bump deliberately when porting to v2.
-- Minor: the server's advertised `serverInfo.version` now reflects the mcp SDK
-  version rather than the previously hardcoded `"2.1.0"` (FastMCP takes no
-  `version=` parameter).
+- `serverInfo.version` parity is preserved: FastMCP takes no `version=`
+  parameter, so `create_server()` sets the kanbanger package `__version__` on
+  the low-level server explicitly. The handshake still advertises `"2.1.0"`,
+  matching the previous `MCPServer(version=...)` behaviour.
 
 ## Alternatives Considered
 
