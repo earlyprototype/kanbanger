@@ -92,8 +92,6 @@ def build_claude_md_block(project_dir: Path) -> str:
     (b) keep the board project-scoped, and (c) how to recover when the
     per-project venv isn't provisioned (e.g. on a fresh clone).
     """
-    source = to_forward_slashes(PARTYMIX_SOURCE / "scripts" / "setup-venv.py")
-    project = to_forward_slashes(project_dir)
     return f"""{CLAUDE_MD_START}
 ## Kanbanger: task board for this project
 
@@ -119,7 +117,7 @@ this project.
 fresh clone won't have it). Re-provision and restart the session:
 
 ```
-python "{source}" "{project}"
+python <partymix>/scripts/setup-venv.py
 ```
 {CLAUDE_MD_END}
 """
