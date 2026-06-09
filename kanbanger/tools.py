@@ -21,6 +21,7 @@ from kanban_io import (
     kanban_lock,
     parse_task_title_with_description as _parse_task_title_with_description,
 )
+from .provision import provision_project
 
 # S6: title-injection guard. Lines beginning with `* [` are kanban
 # task entries and `## ` are column headers; allowing those patterns
@@ -1266,3 +1267,54 @@ def register_tools(server: FastMCP):
                 "reason": reason,
             },
         )
+
+    @server.tool()
+    def setup_project() -> str:
+        """
+        Provision THIS workspace for kanbanger (idempotent first-contact setup).
+
+        Run this when kanbanger is installed but the current project has no
+        board yet, or you want to (re-)establish the agent touchpoint and MCP
+        wiring. Safe to run repeatedly: existing files are never clobbered.
+
+        Provisions, in the workspace (KANBANGER_WORKSPACE, or the server's cwd):
+          - `_kanban.md`: the board, canonical 5-column schema
+            (BACKLOG -> TODO -> DOING -> REVIEW -> DONE). If a board already
+            exists it is left EXACTLY as-is and reported as already present.
+          - `CLAUDE.md`: the agent onboarding stanza (drive the board via the
+            MCP tools; never hand-edit `_kanban.md`; REVIEW gates DONE). Added
+            if absent, refreshed in place if the marker block is already there.
+            `AGENTS.md` gets the same stanza only if it already exists.
+          - `.mcp.json`: wires the project to the global `kanbanger-mcp`
+            command, with EMPTY GitHub-sync placeholders. Written only if
+            absent; an existing `.mcp.json` is left untouched.
+          - `.gitignore`: ensures a stray `.venv/` stays out of version control.
+
+        GitHub sync: the GITHUB_TOKEN / GITHUB_REPO / GITHUB_PROJECT_NUMBER
+        slots in `.mcp.json` are empty `${VAR:-}` placeholders. NO secret is
+        ever written; fill them via your environment or a local, gitignored
+        `.env`, then sync_to_github / get_sync_status will pick them up.
+
+        Returns:
+            A human-readable summary of what was created vs already present.
+
+        Note: this does NOT mint any in-board binding key — board discovery
+        stays workspace-based (KANBANGER_WORKSPACE / cwd).
+        """
+        workspace = get_workspace()
+        try:
+            result = provision_project(workspace)
+        except FileNotFoundError as e:
+            return _error(
+                ERROR_CONFIGURATION,
+                f"Cannot provision: {e}. Set KANBANGER_WORKSPACE to an existing "
+                "project directory (or launch the server from one).",
+                workspace=workspace,
+            )
+        except Exception as e:
+            return _error(
+                ERROR_WRITE_FAILED,
+                f"Provisioning failed: {e}",
+                workspace=workspace,
+            )
+        return result.summary()

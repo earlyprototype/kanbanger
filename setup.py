@@ -54,6 +54,9 @@ setup(
             "kanban-sync=sync_kanban:main",
             "kanban-doctor=kanban_doctor:main",
             "kanbanger-mcp=kanbanger.server:main",
+            # CLI-parity sibling of the in-MCP setup_project tool:
+            # `kanbanger init` provisions a project via kanbanger.provision.
+            "kanbanger=kanbanger.cli:main",
         ],
     },
     python_requires=">=3.10",
