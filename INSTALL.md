@@ -15,12 +15,10 @@ server should load automatically.
 
 ## Why a per-project venv?
 
-Both the original `kanban-project-sync` (v2.1.0, source at `_kanbanger/`)
-and `kanbanger-partymix` (the v3.0 successor) declare the same importable
-Python package name: `kanbanger_mcp`. When both are pip-installed
-system-wide, the editable install silently shadows the other, and
-`python -m kanbanger_mcp` can resolve to the wrong source. This causes
-"Server not connected" errors in MCP clients with no clear diagnosis.
+The original `kanban-project-sync` (v2.1.0, source at `_kanbanger/`)
+used the importable module name `kanbanger_mcp`. This repo (`kanbanger-partymix`)
+has been renamed to `kanbanger` (see ADR 0002). A per-project venv is still
+supported for projects that need isolation from other Python installs.
 
 A per-project venv solves the collision by isolating each project's
 kanbanger install. The project's `.mcp.json` pins an absolute path to its
@@ -32,12 +30,12 @@ the right kanbanger.
 1. `python -m venv <project>/.venv`
 2. `<venv>/python -m pip install --upgrade pip`
 3. `<venv>/python -m pip install -e <partymix-source>[mcp]`
-4. Verifies that `import kanbanger_mcp` in the venv resolves to the
+4. Verifies that `import kanbanger` in the venv resolves to the
    partymix source.
 5. Writes `<project>/.mcp.json` with:
    - `command` = absolute path to `<venv>/Scripts/python.exe` (Windows)
      or `<venv>/bin/python` (Unix)
-   - `args` = `["-m", "kanbanger_mcp"]`
+   - `args` = `["-m", "kanbanger"]`
    - `env` block with `KANBANGER_WORKSPACE` and GitHub credentials slots
 6. Appends `.venv/` to `.gitignore` (creating the file if missing).
 7. Adds a Kanbanger onboarding stanza to `<project>/CLAUDE.md` (idempotent —
@@ -89,13 +87,13 @@ you set the encoding in the Save As dialog.
 After the script finishes, in the project's `.venv`:
 
 ```
-.venv\Scripts\python -c "import kanbanger_mcp; print(kanbanger_mcp.__file__)"
+.venv\Scripts\python -c "import kanbanger; print(kanbanger.__file__)"
 ```
 
 Expected output:
 
 ```
-<partymix-source>\kanbanger_mcp\__init__.py
+<partymix-source>\kanbanger\__init__.py
 ```
 
 If the file path is anywhere else (e.g. `site-packages` or another
@@ -128,13 +126,13 @@ local to the project.
 location and looks for `setup.py` in the parent directory. If you moved
 or renamed `scripts/`, fix it back.
 
-**"Could not import kanbanger_mcp in the venv"** — The `pip install`
+**"Could not import kanbanger in the venv"** — The `pip install`
 failed silently. Re-run with `--quiet` removed from the script for a
 verbose trace.
 
 **".mcp.json is loaded but server reports 'not connected'"** —
 Usually means the venv's python has a broken dependency. Activate the
-venv manually and run `python -m kanbanger_mcp --help` to see the real
+venv manually and run `python -m kanbanger --help` to see the real
 error.
 
 **"I want to use the same venv for multiple projects"** — Don't.

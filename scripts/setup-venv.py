@@ -54,7 +54,7 @@ def build_mcp_config(project_dir: Path, venv_python: Path) -> dict:
         "mcpServers": {
             "kanbanger": {
                 "command": to_forward_slashes(venv_python),
-                "args": ["-m", "kanbanger_mcp"],
+                "args": ["-m", "kanbanger"],
                 "env": {
                     "KANBANGER_WORKSPACE": "${KANBANGER_WORKSPACE:-" + project_path_fwd + "}",
                     "GITHUB_TOKEN": "${GITHUB_TOKEN:-}",
@@ -229,25 +229,25 @@ def main(argv=None) -> int:
     print("\nStep 3: installing partymix editable with [mcp] extras...")
     run([str(venv_python), "-m", "pip", "install", "-e", f"{PARTYMIX_SOURCE}[mcp]", "--quiet"])
 
-    print("\nStep 4: verifying kanbanger_mcp resolves to partymix source...")
+    print("\nStep 4: verifying kanbanger resolves to partymix source...")
     check = subprocess.run(
         [
             str(venv_python),
             "-c",
-            "import kanbanger_mcp, os; "
-            "print(os.path.dirname(os.path.abspath(kanbanger_mcp.__file__)))",
+            "import kanbanger, os; "
+            "print(os.path.dirname(os.path.abspath(kanbanger.__file__)))",
         ],
         capture_output=True,
         text=True,
     )
     if check.returncode != 0:
-        print("  FAIL: could not import kanbanger_mcp in the venv", file=sys.stderr)
+        print("  FAIL: could not import kanbanger in the venv", file=sys.stderr)
         print(check.stderr, file=sys.stderr)
         return 2
     resolved = Path(check.stdout.strip())
-    expected = (PARTYMIX_SOURCE / "kanbanger_mcp").resolve()
+    expected = (PARTYMIX_SOURCE / "kanbanger").resolve()
     if resolved.resolve() == expected:
-        print(f"  OK: kanbanger_mcp -> {resolved}")
+        print(f"  OK: kanbanger -> {resolved}")
     else:
         print(f"  WARN: expected {expected}")
         print(f"        got      {resolved}")

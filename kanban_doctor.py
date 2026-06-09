@@ -10,7 +10,7 @@ Adapted from v2.1.0's kanban_doctor.py (frozen at _kanbanger/). Partymix
 additions:
   - install-collision detector (flags if multiple kanbanger dists are
     installed, e.g. v2.1.0 and partymix both reachable via pip)
-  - kanbanger_mcp.__file__ surfaced in the importable check (catches
+  - kanbanger.__file__ surfaced in the importable check (catches
     cases where partymix code is being tested but a different package
     is winning the import resolution race)
   - .kanban.json schema_version check (R8)
@@ -359,7 +359,7 @@ def check_status_field(projects):
         return
     opts = {o["name"] for o in status_field["options"]}
     # Partymix is the 5-column release: BACKLOG/TODO/DOING/REVIEW/DONE
-    # is auto-injected by kanbanger_mcp.server at startup, and
+    # is auto-injected by kanbanger.server at startup, and
     # sync_kanban.LocalBoard.parse maps `## REVIEW` -> Status="Review".
     # The GH Project's Status field must therefore expose all five
     # options or REVIEW items land with no Status. See
@@ -435,13 +435,13 @@ def check_mcp_installed():
         return False
 
 
-def check_kanbanger_mcp_importable():
+def check_kanbanger_importable():
     """Surface __file__ so install-source surprises are visible."""
-    label = "kanbanger_mcp package"
+    label = "kanbanger package"
     try:
-        import kanbanger_mcp
-        version = getattr(kanbanger_mcp, "__version__", "unknown")
-        source_path = os.path.dirname(os.path.abspath(kanbanger_mcp.__file__))
+        import kanbanger
+        version = getattr(kanbanger, "__version__", "unknown")
+        source_path = os.path.dirname(os.path.abspath(kanbanger.__file__))
         _emit(PASS_TAG, label,
               f"importable (version {version}) from {source_path}")
         return source_path, version
@@ -470,7 +470,7 @@ def check_install_collision():
         names_versions = ", ".join(f"{n}=={v}" for n, v in found)
         _emit(WARN_TAG, label,
               f"multiple kanbanger dists installed: {names_versions}",
-              "Both packages expose the same importable name (`kanbanger_mcp`). "
+              "Multiple kanbanger dists installed; check for shadowing conflicts. "
               "Use scripts/setup-venv.py (per-project venv) to isolate, "
               "or `pip uninstall` the one not needed for this project.")
     elif len(found) == 1:
@@ -487,7 +487,7 @@ def check_version_consistency(import_version):
     """Catch dist-vs-package version drift (e.g. setup.py 0.0.1 / __version__ 2.1.0)."""
     label = "Dist / package version consistency"
     if import_version is None:
-        _emit(SKIP_TAG, label, "skipped (kanbanger_mcp not importable)")
+        _emit(SKIP_TAG, label, "skipped (kanbanger not importable)")
         return
     try:
         import importlib.metadata as md
@@ -510,8 +510,8 @@ def check_version_consistency(import_version):
         _emit(PASS_TAG, label, f"{dist_name} dist=={dist_version}, package=={import_version}")
     else:
         _emit(WARN_TAG, label,
-              f"{dist_name} dist=={dist_version} but kanbanger_mcp.__version__=={import_version}",
-              "Either update setup.py version, or update kanbanger_mcp/__init__.py "
+              f"{dist_name} dist=={dist_version} but kanbanger.__version__=={import_version}",
+              "Either update setup.py version, or update kanbanger/__init__.py "
               "__version__ string. They should match.")
 
 
@@ -576,7 +576,7 @@ def main():
 
     _section("MCP server")
     check_mcp_installed()
-    _src, import_version = check_kanbanger_mcp_importable()
+    _src, import_version = check_kanbanger_importable()
 
     _section("Install integrity (partymix additions)")
     check_install_collision()

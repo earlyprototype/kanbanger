@@ -18,7 +18,7 @@ import asyncio
 import pytest
 
 from mcp.server.fastmcp import FastMCP
-from kanbanger_mcp.server import create_server
+from kanbanger.server import create_server
 
 
 EXPECTED_TOOLS = {
@@ -79,6 +79,6 @@ def test_server_advertises_kanbanger_version(server: FastMCP):
     SDK version. FastMCP has no version= param, so create_server() sets it on
     the low-level server; this guards that parity (and catches it if a future
     SDK rename removes the attribute)."""
-    from kanbanger_mcp import __version__
+    from kanbanger import __version__
 
     assert server._mcp_server.version == __version__

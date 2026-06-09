@@ -264,7 +264,7 @@ We currently support only English. If you'd like to add translations:
 
 ```
 kanbanger-partymix/
-├── kanbanger_mcp/              # MCP server (tools, resources, prompts, server)
+├── kanbanger/                  # MCP server (tools, resources, prompts, server)
 ├── sync_kanban.py              # Core sync engine
 ├── kanban_io.py                # Shared board I/O + column discovery
 ├── kanban_doctor.py            # Install / preflight diagnostics
@@ -280,7 +280,7 @@ kanbanger-partymix/
 ```
 
 **Key files to understand:**
-- `kanbanger_mcp/` - The MCP server (`tools.py`, `resources.py`, `prompts.py`, `server.py`)
+- `kanbanger/` - The MCP server (`tools.py`, `resources.py`, `prompts.py`, `server.py`)
 - `sync_kanban.py` - Sync logic (parsing, syncing, GraphQL)
 - `LLM_GUIDANCE.md` - How LLMs should interact with kanbans
 

@@ -14,7 +14,7 @@ setup(
     extras_require={
         # Native MCP SDK (FastMCP). Capped below 2.0 on purpose: mcp v2
         # renames FastMCP -> MCPServer and moves transport params onto
-        # run(), which would break kanbanger_mcp.server. Bump
+        # run(), which would break kanbanger.server. Bump
         # deliberately when porting to the v2 API. (Replaced mcp-use,
         # dropped 2026-06-04 — see DECISION-drop-mcp_use.)
         "mcp": [
@@ -25,7 +25,7 @@ setup(
         "console_scripts": [
             "kanban-sync=sync_kanban:main",
             "kanban-doctor=kanban_doctor:main",
-            "kanbanger-mcp=kanbanger_mcp.server:main",
+            "kanbanger-mcp=kanbanger.server:main",
         ],
     },
     python_requires=">=3.10",

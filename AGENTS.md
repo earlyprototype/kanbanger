@@ -34,13 +34,13 @@ Stdio (default, for MCP clients):
 
 ```bash
 export KANBANGER_WORKSPACE=/path/to/project   # directory containing _kanban.md
-python3 -m kanbanger_mcp
+python3 -m kanbanger
 ```
 
 HTTP transport (optional):
 
 ```bash
-python3 -m kanbanger_mcp --transport streamable-http --host 127.0.0.1 --port 8000
+python3 -m kanbanger --transport streamable-http --host 127.0.0.1 --port 8000
 ```
 
 ### Per-project consumer setup (`setup-venv.py`)
@@ -62,6 +62,6 @@ Point it at this repo clone: `python3 /workspace/scripts/setup-venv.py /path/to/
 | Component | Required for `pytest` | Notes |
 |-----------|----------------------|--------|
 | Python 3.10+ + editable `[mcp]` install | Yes | |
-| `kanbanger_mcp` subprocess | Only `tests/test_stdio_e2e.py` | Test spawns it automatically |
+| `kanbanger` subprocess | Only `tests/test_stdio_e2e.py` | Test spawns it automatically |
 | GitHub API | No | Optional for sync demos |
 | MCP IDE host | No | Optional for manual MCP E2E |

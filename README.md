@@ -161,7 +161,7 @@ Create `_kanban.md` in your project root:
     "mcpServers": {
         "kanbanger": {
             "command": "/abs/path/to/project/.venv/Scripts/python.exe",
-            "args": ["-m", "kanbanger_mcp"],
+            "args": ["-m", "kanbanger"],
             "env": {
                 "KANBANGER_WORKSPACE": "${KANBANGER_WORKSPACE:-/abs/path/to/project}",
                 "GITHUB_TOKEN": "${GITHUB_TOKEN:-}",
@@ -175,8 +175,8 @@ Create `_kanban.md` in your project root:
 
 **Key points:**
 - `${VAR:-default}` - Claude Code substitution syntax (not Cursor's `${env:VAR}`).
-- **Per-project venv** - the pinned `.venv` python avoids the `kanbanger_mcp`
-  import collision between installs (see [INSTALL.md](INSTALL.md)).
+- **Per-project venv** - the pinned `.venv` python ensures the correct install
+  resolves (see [INSTALL.md](INSTALL.md)).
 - **Per-project** - each project gets its own independent `.mcp.json` + venv.
 
 ### GitHub credentials
@@ -208,7 +208,7 @@ into the MCP server spawn:
 | `kanban-doctor` | Preflight / diagnose a project's install |
 | `kanban-sync _kanban.md --dry-run` | Preview changes (safe) |
 | `kanban-sync _kanban.md` | Sync to GitHub |
-| `python -m kanbanger_mcp --help` | MCP server options |
+| `python -m kanbanger --help` | MCP server options |
 
 **Or just ask your AI!**
 - "Add task X to TODO"
@@ -294,7 +294,7 @@ ls .mcp.json
 
 2. **Check the venv resolves kanbanger:**
 ```bash
-.venv/Scripts/python -c "import kanbanger_mcp; print(kanbanger_mcp.__file__)"
+.venv/Scripts/python -c "import kanbanger; print(kanbanger.__file__)"
 ```
 
 3. **Restart Claude Code** - required after `.mcp.json` changes.

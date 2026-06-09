@@ -105,7 +105,7 @@ def parse_task_title_with_description(
 ) -> Optional[Tuple[str, Optional[str]]]:
     """Extract `(title, description_or_None)` from a markdown task line.
 
-    D8: shared parser hoisted out of `kanbanger_mcp.tools` so both the
+    D8: shared parser hoisted out of `kanbanger.tools` so both the
     MCP-tools code path AND the `sync_kanban.LocalBoard.parse` code path
     can use the same canonical helper. Without sharing, the two parsers
     drifted: tools.py stripped ` - description` from titles for dedup,

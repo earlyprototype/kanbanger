@@ -68,3 +68,6 @@ _smoke_*.py
 _smoke_*.txt
 _smoke_*.out
 _smoke_*.err
+
+# Per-project venv created by kanbanger-partymix/scripts/setup-venv.py
+.venv/
