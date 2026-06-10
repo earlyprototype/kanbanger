@@ -27,7 +27,7 @@ kanbanger-partymix is an **MCP (Model Context Protocol) server** that gives AI a
   *   [x] Completed, human-approved work
   ```
 
-  Boards created by older kanbanger versions with four columns get the REVIEW column added automatically the next time the server starts.
+  A board with only four columns gets the REVIEW column added automatically at server start.
 
 - **AI drives it through MCP tools.** `add_task`, `move_task`, `list_tasks`, … — every change is validated, locked, and written atomically. Agents never hand-edit the file. Full rules for AI agents: [LLM_GUIDANCE.md](LLM_GUIDANCE.md).
 
@@ -35,7 +35,7 @@ kanbanger-partymix is an **MCP (Model Context Protocol) server** that gives AI a
 
 - **Install once, board per project.** One global `kanbanger-mcp` on PATH serves every project; each project keeps its own `_kanban.md` + `.mcp.json`, so boards never mix.
 
-- **GitHub sync is optional and one-way.** Configure it and the board pushes to a GitHub Projects V2 board: local markdown → GitHub. The markdown stays the source of truth; edits made on the GitHub side are not pulled back.
+- **GitHub sync is optional and currently one-way (markdown → GitHub Projects).** Configure it and the board pushes to a GitHub Projects V2 board. The markdown stays the source of truth; edits made on the GitHub side are not pulled back.
 
 ## Quick start
 
@@ -108,7 +108,7 @@ kanban-sync _kanban.md             # sync to GitHub
 
 ## GitHub Projects V2 sync
 
-Optional. Sync is **one-way** — local markdown → GitHub. Tasks become draft issues on the Project; tasks removed locally are archived (not deleted) on GitHub; sync state lives in a `.kanban.json` sidecar next to the board.
+Optional. Sync is currently **one-way** (markdown → GitHub Projects). Tasks become draft issues on the Project; tasks removed locally are archived (not deleted) on GitHub; sync state lives in a `.kanban.json` sidecar next to the board.
 
 ### One-time GitHub setup
 
@@ -116,17 +116,13 @@ Optional. Sync is **one-way** — local markdown → GitHub. Tasks become draft 
 
 **2. Link the Project to your repository.** On the repo: Projects tab → "Link a project". This is mandatory — kanbanger discovers projects through the repository's linked-projects list, so an unlinked project is invisible to sync even if you own it.
 
-**3. Configure the Status field.** The Project's `Status` field (single-select) must have exactly these five options — case-sensitive, no spaces:
-
-```
-Backlog, Todo, InProgress, Review, Done
-```
-
-> **Gotcha:** a fresh GitHub Project ships with `Todo / In Progress / Done`. Rename **`In Progress` → `InProgress`** (remove the space) and add **`Backlog`** and **`Review`**. A column whose option doesn't match exactly syncs as a status-less item — no error is raised.
+**3. One-time: set the project's Status options** to exactly `Backlog, Todo, InProgress, Review, Done` (rename GitHub's default 'In Progress'; add 'Backlog' and 'Review'). Automating this is tracked.
 
 **4. Note the project number.** It's the `N` in the project URL (`github.com/users/<you>/projects/N`). Optional — when unset, the first project linked to the repo is used — but set it whenever more than one project is linked.
 
-**5. Create a token.** Classic personal access token with scopes **`repo` + `project`** (GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic)).
+**5.** Create a ***Classic Personal Access Token***.
+
+> **Click path (it's well hidden):** GitHub → your avatar → **Settings** → **Developer settings** (bottom of left sidebar) → **Personal access tokens** → **Tokens (classic)** → **Generate new token (classic)** → scopes: `repo` + `project`.
 
 - Fine-grained tokens (`github_pat_…`) **do not work** — they cannot access the Projects V2 GraphQL API.
 - OAuth tokens from `gh auth token` (`gho_…`) work, but are replaced whenever `gh auth login` runs again; `kanban-doctor` warns about them. Prefer a dedicated classic PAT for anything long-lived.
@@ -152,9 +148,8 @@ Three values: `GITHUB_TOKEN`, `GITHUB_REPO` (`owner/repo`), and (recommended) `G
 ### First sync
 
 1. Restart the Claude session so the MCP server picks up the new env values.
-2. Verify with `kanban-doctor` — it checks the token, repo visibility, Projects V2 access, and the Status options.
-3. Preview: ask the AI to run `sync_to_github(dry_run=true)` (or `kanban-sync _kanban.md --dry-run`).
-4. Real run: `sync_to_github()` / `kanban-sync _kanban.md` — creates draft issues for new tasks, archives removed ones, and writes the `.kanban.json` state sidecar.
+2. Ask your assistant to verify the setup — it can run a dry-run sync (`sync_to_github` with `dry_run`) and report what would change. (`kanban-doctor` remains the manual/CI diagnostic.)
+3. Real run: ask for a sync — `sync_to_github()` creates draft issues for new tasks, archives removed ones, and writes the `.kanban.json` state sidecar. (CLI: `kanban-sync _kanban.md`.)
 
 ## Commands
 
@@ -169,12 +164,13 @@ Three values: `GITHUB_TOKEN`, `GITHUB_REPO` (`owner/repo`), and (recommended) `G
 
 **Or just ask your AI:** "Add task X to TODO", "Move task Y to DOING", "Sync to GitHub".
 
-## MCP surface reference
+## MCP Tool Reference
 
 Your AI assistant gets these **tools**:
 
 | Tool | Purpose |
 |------|---------|
+| `setup_project()` | Provision this workspace (idempotent) |
 | `add_task(title, column, description?)` | Add a task |
 | `move_task(title, from_column, to_column)` | Move a task between columns |
 | `delete_task(title, column)` | Remove a task |
@@ -184,7 +180,6 @@ Your AI assistant gets these **tools**:
 | `reject_review(title, reason)` | Send a REVIEW task back with feedback |
 | `sync_to_github(dry_run?)` | Push the board to GitHub |
 | `get_sync_status()` | Check sync state |
-| `setup_project()` | Provision this workspace (idempotent) |
 
 These **resources** (always visible):
 
@@ -320,7 +315,7 @@ A: Yes — `kanban-sync _kanban.md` works standalone.
 A: Any MCP client that can launch a stdio server can run `kanbanger-mcp`. The generated `.mcp.json` uses Claude Code's `${VAR:-}` env-placeholder syntax — adapt the config format for other clients.
 
 **Q: What if I already use GitHub Projects?**
-A: Kanbanger syncs one-way: local → GitHub. Your Project becomes a view of your markdown; remote-side edits are not pulled back.
+A: Sync is currently one-way (markdown → GitHub Projects). Your Project becomes a view of your markdown; remote-side edits are not pulled back.
 
 **Q: Can I use multiple GitHub Projects?**
 A: Yes — one project per workspace, each configured independently.

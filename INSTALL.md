@@ -79,7 +79,7 @@ What provisioning writes — idempotent, safe to re-run:
    ever makes to one is inserting the `<!-- kanbanger:board-id: ... -->`
    marker comment when it's missing (enables collision detection); every
    other byte is preserved. (Separately, the running MCP server adds a
-   REVIEW column to an older 4-column board at startup — the review-gate
+   REVIEW column to a 4-column board at startup — the review-gate
    tools require it.)
 2. `.mcp.json` — wires the project to the global `kanbanger-mcp` command,
    with empty `${VAR:-}` GitHub-sync placeholders. Left untouched if the
@@ -162,17 +162,17 @@ data only ever lives in the project.
   the board-key marker comment when absent (enables collision detection);
   every other byte is preserved.
 
-## Migrating from an older install
+## Migrating from a per-project `.venv` install
 
-If a project was set up by an older kanbanger that installed into a
-per-project `.venv`:
+If a project's `.mcp.json` points at a per-project `.venv` instead of the
+global `kanbanger-mcp` command:
 
-1. Delete the project's old `.venv/`.
-2. Move the old `.mcp.json` aside so a fresh one can be written.
+1. Delete the project's `.venv/`.
+2. Move the existing `.mcp.json` aside so a fresh one can be written.
 3. Run `kanbanger init` from the project root.
 4. Restart the Claude session.
 
-If the old `kanban-project-sync` v2 dist is still installed on the machine,
+If a `kanban-project-sync` dist is installed on the machine,
 `pip uninstall kanban-project-sync` removes it (the install-collision check
 in `kanban-doctor` flags it).
 
