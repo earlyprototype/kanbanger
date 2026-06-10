@@ -53,7 +53,7 @@ pipx install C:/path/to/kanbanger-partymix
 Plain `pip install` (or `uv tool install`) of either form works too. No git
 client on the machine? Install straight from the source zip:
 
-```
+```bash
 pip install https://github.com/earlyprototype/kanbanger-partymix/archive/refs/heads/main.zip
 ```
 
