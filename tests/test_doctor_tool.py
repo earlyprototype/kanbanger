@@ -14,12 +14,14 @@ render_report(). These tests pin:
     CLI's --no-network),
   * tool output == CLI output, line for line (the anti-drift parity gate),
   * the structured core's contract (results/counts/verdict/local-only),
-  * run_doctor never prints with echo off and never touches the legacy
-    module counters (safe to embed in a long-lived stdio server).
+  * run_doctor never prints with echo off, never touches the legacy
+    module counters, and never mutates os.environ (safe to embed in a
+    long-lived stdio server).
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import types
@@ -218,6 +220,7 @@ def test_doctor_tool_output_matches_cli_line_for_line(
         ],
         capture_output=True,
         text=True,
+        timeout=30,
     )
 
     assert cli.returncode == 0, f"STDOUT:\n{cli.stdout}\nSTDERR:\n{cli.stderr}"
@@ -285,3 +288,35 @@ def test_run_doctor_leaves_legacy_counters_untouched(
     kanban_doctor.run_doctor(kanban_workspace, no_network=True)
 
     assert dict(kanban_doctor._results) == before
+
+
+def test_run_doctor_does_not_mutate_process_env(
+    kanban_workspace: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """PR #24 review: run_doctor executes inside the long-lived MCP server
+    process, so reading a workspace .env must never write os.environ --
+    one run would otherwise leak that workspace's config into every later
+    tool call and sync_to_github subprocess. The report must still
+    REFLECT the .env values: they reach the checks via the per-run
+    effective env (.env overrides shell), and the source line attributes
+    them to 'workspace .env'."""
+    import kanban_doctor
+
+    _clear_github_env(monkeypatch)
+    (kanban_workspace / ".env").write_text(
+        "GITHUB_REPO=owner/envrepo\nDOCTOR_ENV_SENTINEL=leaked\n",
+        encoding="utf-8",
+    )
+    before = dict(os.environ)
+
+    report = kanban_doctor.run_doctor(kanban_workspace, no_network=True)
+
+    assert "DOCTOR_ENV_SENTINEL" not in os.environ, ".env leaked into os.environ"
+    assert dict(os.environ) == before, "run_doctor mutated os.environ"
+    body = "\n".join(report.body_lines)
+    assert "GITHUB_REPO: workspace .env ('owner/envrepo')" in body
+    assert "[PASS] GITHUB_REPO: owner/envrepo" in body
+    # .env supplies the repo but no token: half-configured sync must keep
+    # FAILing (local-only must not engage just because os.environ is bare).
+    assert report.local_only is False
+    assert "[FAIL] GITHUB_TOKEN: not set" in body

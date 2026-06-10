@@ -36,6 +36,10 @@ additions:
     the CLI echoes the lines progressively (byte-identical to the
     pre-refactor output), the tool renders them verdict-first via
     render_report(). This module must never import the mcp SDK.
+    run_doctor() also never mutates os.environ: the workspace .env is
+    overlaid into a per-run effective env mapping (build_effective_env),
+    so a doctor run inside the long-lived MCP server can't leak one
+    workspace's config into later tool calls or sync subprocesses.
 
 Usage:
     kanban-doctor                    # run from a workspace with _kanban.md
@@ -303,13 +307,15 @@ def check_python_version():
 
 
 def check_env_file(workspace):
+    """Report the workspace .env's existence. Reporting ONLY: this never
+    mutates os.environ (run_doctor executes inside the long-lived MCP
+    server process; the .env values reach the checks via the per-run
+    effective env from build_effective_env instead)."""
     label = ".env file"
     env_path = workspace / ".env"
     if env_path.exists():
         _emit(PASS_TAG, label, f"found at {env_path}")
-        if load_dotenv is not None:
-            load_dotenv(env_path, override=True)
-        else:
+        if load_dotenv is None:
             _emit(WARN_TAG, ".env auto-load",
                   "python-dotenv not installed; .env values not auto-loaded",
                   "pip install python-dotenv")
@@ -324,11 +330,12 @@ def check_env_file(workspace):
 def read_env_file_values(workspace):
     """Return the non-empty values the workspace .env supplies.
 
-    Used for source attribution and local-only detection. Prefers
-    python-dotenv's parser; falls back to a minimal KEY=VALUE parse so
-    detection still works when dotenv isn't installed (in which case the
-    values are NOT merged into os.environ -- the checks won't see them,
-    but their existence still disables local-only mode).
+    Used for source attribution, local-only detection, and the per-run
+    effective env (build_effective_env). Prefers python-dotenv's parser;
+    falls back to a minimal KEY=VALUE parse so detection still works
+    when dotenv isn't installed (in which case the values are NOT
+    overlaid into the effective env -- the checks won't see them, but
+    their existence still disables local-only mode).
     """
     env_path = workspace / ".env"
     if not env_path.exists():
@@ -351,6 +358,24 @@ def read_env_file_values(workspace):
     except OSError:
         pass  # unreadable .env: attribution degrades, check_env_file reports it
     return values
+
+
+def build_effective_env(env_file_vals):
+    """The per-run env mapping the doctor checks consume: the process
+    env overlaid with the workspace .env values (.env wins -- the same
+    precedence the CLI has always had via load_dotenv(override=True)),
+    WITHOUT writing os.environ. run_doctor executes inside the
+    long-lived MCP server process (issue #23), where mutating os.environ
+    would leak one workspace's .env into every later tool call and
+    sync_to_github subprocess.
+
+    When python-dotenv is missing the .env is NOT overlaid, matching the
+    legacy non-merge behavior (check_env_file WARNs '.env auto-load' and
+    the checks see the shell env only).
+    """
+    if load_dotenv is None:
+        return dict(os.environ)
+    return {**os.environ, **env_file_vals}
 
 
 def read_mcp_project_env(workspace):
@@ -389,17 +414,20 @@ def read_mcp_project_env(workspace):
     return True, literals
 
 
-def is_local_only(env_file_vals, mcp_literals):
+def is_local_only(env_file_vals, mcp_literals, environ=None):
     """True when GitHub sync is plainly not configured anywhere.
 
     Rule: neither GITHUB_TOKEN nor GITHUB_REPO is supplied by the
-    effective env (shell, plus workspace .env after check_env_file's
-    merge), by an unmerged .env (dotenv missing), or by a non-empty
-    .mcp.json literal/default. ANY single signal disables local-only:
-    a half-configured sync must keep FAILing.
+    effective env (`environ`: shell overlaid with the workspace .env via
+    build_effective_env; defaults to os.environ for direct callers), by
+    an unmerged .env (dotenv missing), or by a non-empty .mcp.json
+    literal/default. ANY single signal disables local-only: a
+    half-configured sync must keep FAILing.
     """
+    if environ is None:
+        environ = os.environ
     for var in GITHUB_SYNC_VARS:
-        if os.environ.get(var):
+        if environ.get(var):
             return False
         if env_file_vals.get(var):
             return False
@@ -408,13 +436,16 @@ def is_local_only(env_file_vals, mcp_literals):
     return True
 
 
-def _mcp_divergence_notes(mcp_literals):
-    """Notes for each GitHub var where ambient env and the project's
-    .mcp.json would disagree at server launch. Values are never printed
-    here (the source lines above show the repo; tokens never appear)."""
+def _mcp_divergence_notes(mcp_literals, environ=None):
+    """Notes for each GitHub var where the effective env (`environ`,
+    default os.environ) and the project's .mcp.json would disagree at
+    server launch. Values are never printed here (the source lines above
+    show the repo; tokens never appear)."""
+    if environ is None:
+        environ = os.environ
     notes = []
     for var in GITHUB_SYNC_VARS:
-        ambient = os.environ.get(var)
+        ambient = environ.get(var)
         project = (mcp_literals or {}).get(var, "")
         if ambient and not project:
             notes.append(
@@ -431,21 +462,25 @@ def _mcp_divergence_notes(mcp_literals):
     return notes
 
 
-def config_source_lines(env_file_vals, mcp_exists, mcp_literals, forced, local_only):
+def config_source_lines(env_file_vals, mcp_exists, mcp_literals, forced, local_only,
+                        environ=None):
     """Issue #18 item 2: state WHERE each GitHub value came from and flag
     ambient-vs-.mcp.json disagreement.
 
     Returns the exact lines the CLI prints (informational context, never
-    counted, never exit-affecting). The checks still consume the ambient
-    env only (beyond the local-only gating of the not-set case).
+    counted, never exit-affecting). The checks consume the same effective
+    env (`environ`: shell overlaid with the workspace .env; defaults to
+    os.environ for direct callers).
     """
+    if environ is None:
+        environ = os.environ
     lines = []
     for var in GITHUB_SYNC_VARS:
-        effective = os.environ.get(var)
+        effective = environ.get(var)
         if not effective:
             origin = "not set"
         elif load_dotenv is not None and env_file_vals.get(var):
-            origin = "workspace .env"  # load_dotenv(override=True) means .env won
+            origin = "workspace .env"  # the .env overlay wins over the shell
         else:
             origin = "shell env"
         if effective and var != "GITHUB_TOKEN":
@@ -454,7 +489,7 @@ def config_source_lines(env_file_vals, mcp_exists, mcp_literals, forced, local_o
     if mcp_exists and mcp_literals is None:
         lines.append("  note: .mcp.json present but unparseable -- cannot compare project config")
     elif mcp_exists:
-        for note in _mcp_divergence_notes(mcp_literals):
+        for note in _mcp_divergence_notes(mcp_literals, environ):
             lines.append(f"  {note}")
     if local_only and forced:
         lines.append("  local-only mode (--local-only) -- missing GitHub sync config will SKIP, not FAIL")
@@ -471,9 +506,11 @@ def print_config_sources(env_file_vals, mcp_exists, mcp_literals, forced, local_
         print(line)
 
 
-def check_token_present(local_only=False):
+def check_token_present(local_only=False, environ=None):
     label = "GITHUB_TOKEN"
-    token = os.environ.get("GITHUB_TOKEN")
+    if environ is None:
+        environ = os.environ
+    token = environ.get("GITHUB_TOKEN")
     if not token:
         if local_only:
             # Local-only boards are a fully supported, healthy state: the
@@ -573,9 +610,11 @@ def check_token_works(token, no_network):
     return None
 
 
-def check_repo_format(local_only=False):
+def check_repo_format(local_only=False, environ=None):
     label = "GITHUB_REPO"
-    repo = os.environ.get("GITHUB_REPO")
+    if environ is None:
+        environ = os.environ
+    repo = environ.get("GITHUB_REPO")
     if not repo:
         if local_only:
             # Same rationale as check_token_present: not applicable, not
@@ -694,12 +733,14 @@ def check_projects_v2_access(token, repo, no_network):
         return None
 
 
-def check_status_field(projects):
+def check_status_field(projects, environ=None):
     label = "Project Status field has required options"
     if not projects:
         _emit(SKIP_TAG, label, "skipped (no projects to check)")
         return
-    project_num = os.environ.get("GITHUB_PROJECT_NUMBER", "").strip()
+    if environ is None:
+        environ = os.environ
+    project_num = environ.get("GITHUB_PROJECT_NUMBER", "").strip()
     target = None
     if project_num and project_num.isdigit():
         target = next((p for p in projects if p["number"] == int(project_num)), None)
@@ -898,6 +939,12 @@ def run_doctor(workspace, *, no_network: bool = False,
     --local-only (auto-detection still applies when False). `workspace`
     should be an absolute, resolved path (callers resolve; the value is
     rendered verbatim in the header).
+
+    Never mutates os.environ: the workspace .env is overlaid into a
+    per-run effective env (build_effective_env) that every env-reading
+    check consumes, so an embedded run can't leak one workspace's config
+    into the MCP server process (later tool calls and sync_to_github
+    subprocesses inherit that env).
     """
     workspace = Path(workspace)
     ctx = _RunContext(echo=echo)
@@ -911,32 +958,39 @@ def run_doctor(workspace, *, no_network: bool = False,
 
         ctx.set_section("Environment")
         check_python_version()
-        check_env_file(workspace)  # merges workspace .env into os.environ
+        check_env_file(workspace)  # existence report only; never mutates os.environ
 
-        # Issue #18: detection must run AFTER the .env merge above so the
-        # effective env is what the credential checks below will consume.
+        # Issue #18 detection + the per-run effective env: shell overlaid
+        # by the workspace .env (the precedence load_dotenv(override=True)
+        # used to install process-wide). Every env-reading check below
+        # consumes THIS mapping; os.environ stays untouched (issue #23:
+        # this runs inside the long-lived MCP server process). The network
+        # checks need no mapping -- token/repo flow to them explicitly via
+        # check_token_present / check_repo_format's return values.
         env_file_vals = read_env_file_values(workspace)
+        environ = build_effective_env(env_file_vals)
         mcp_exists, mcp_literals = read_mcp_project_env(workspace)
-        local_only = local_only_flag or is_local_only(env_file_vals, mcp_literals)
+        local_only = local_only_flag or is_local_only(env_file_vals, mcp_literals,
+                                                      environ)
 
         ctx.set_section("GitHub config sources")
         cfg_lines = config_source_lines(env_file_vals, mcp_exists, mcp_literals,
-                                        local_only_flag, local_only)
+                                        local_only_flag, local_only, environ)
         for line in cfg_lines:
             ctx.line(line)
 
         ctx.set_section("GitHub credentials")
-        token = check_token_present(local_only)
+        token = check_token_present(local_only, environ)
         check_token_format(token)
         check_token_works(token, no_network)
 
         ctx.set_section("Repo and Projects")
-        repo = check_repo_format(local_only)
+        repo = check_repo_format(local_only, environ)
         if token and repo and not no_network:
             repo_ok = check_repo_accessible(token, repo, no_network)
             if repo_ok:
                 projects = check_projects_v2_access(token, repo, no_network)
-                check_status_field(projects)
+                check_status_field(projects, environ)
             else:
                 _emit(SKIP_TAG, "Token can access Projects V2", "skipped (repo not accessible)")
                 _emit(SKIP_TAG, "Project Status field has required options", "skipped (repo not accessible)")
