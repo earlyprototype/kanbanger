@@ -37,6 +37,12 @@ kanbanger is an **MCP (Model Context Protocol) server** that gives AI assistants
 
 - **GitHub sync is optional and currently one-way (markdown → GitHub Projects).** Configure it and the board pushes to a GitHub Projects V2 board. The markdown stays the source of truth; edits made on the GitHub side are not pulled back.
 
+### Why the gate exists
+
+AI-completed work isn't durable until a human has looked at it. Without that checkpoint, "done" on the board and "actually validated" quietly drift apart — a task can read as finished when nobody has confirmed it. REVIEW is the visible queue of work waiting on that confirmation, and the server enforces the boundary itself rather than relying on the AI to remember it.
+
+Rejection isn't a dead end either: `reject_review` opens a new `Rework: <title>` task at the top of TODO, so feedback becomes the next actionable task instead of a comment that gets lost.
+
 ## Quick start
 
 ```mermaid
