@@ -409,10 +409,19 @@ def register_tools(server: FastMCP):
         Example:
             move_task("Implement user authentication", "TODO", "DOING")
 
+        Workflow:
+            DONE is gated. A direct move into DONE is only accepted when
+            from_column is REVIEW; every other from_column -> DONE call
+            is rejected with error_code "gate_violation". The canonical
+            path to DONE is propose_done(title) (DOING -> REVIEW) followed
+            by approve_done(title) (REVIEW -> DONE) — or reject_review(title,
+            reason) if the work needs changes. Do NOT use move_task to mark
+            work complete.
+
         Note:
             - Task title must match exactly
-            - Moving to DONE automatically marks task as completed [x]
-            - Moving from DONE back unchecks the task [ ]
+            - Moving REVIEW -> DONE marks the task completed [x]
+            - Moving a task out of DONE unchecks it [ ]
         """
         kanban_path = get_kanban_path()
 
