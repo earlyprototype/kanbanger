@@ -41,7 +41,8 @@ setup(
     ),
     long_description=read_long_description(),
     long_description_content_type="text/markdown",
-    author="Fab2",
+    author="Thom Conaty",
+    author_email="thomconatydesign@gmail.com",
     license="MIT",
     url="https://github.com/earlyprototype/kanbanger-partymix",
     project_urls={

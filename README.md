@@ -61,10 +61,10 @@ graph LR
 ### 1. Install kanbanger (once per machine)
 
 ```bash
-pipx install kanbanger   # (once published — PyPI release pending)
+pipx install kanbanger
 ```
 
-Until the PyPI release lands, install from git:
+Or install straight from git:
 
 ```bash
 pipx install git+https://github.com/earlyprototype/kanbanger.git
@@ -342,7 +342,7 @@ A: Sync is currently one-way (markdown → GitHub Projects). Your Project become
 A: Yes — one project per workspace, each configured independently.
 
 **Q: Is PyPI available?**
-A: Not yet — install from git (or the zip) for now. A PyPI release is planned.
+A: Yes — `pipx install kanbanger` (or plain `pip install kanbanger`).
 
 ## Documentation
 

@@ -5,7 +5,7 @@
 Once per machine:
 
 ```
-pipx install git+https://github.com/earlyprototype/kanbanger.git
+pipx install kanbanger
 ```
 
 Once per project, from the project's root directory:
@@ -17,9 +17,9 @@ kanbanger init
 Then open a fresh Claude Code session in that project. The kanbanger MCP
 server loads via the project's `.mcp.json`.
 
-(Once published to PyPI this becomes `pipx install kanbanger` — not on PyPI
-yet, so install from git or a local clone for now. Plain `pip` and
-`uv tool install` work the same way if you don't use pipx.)
+(Plain `pip install kanbanger` and `uv tool install kanbanger` work the
+same way if you don't use pipx. Installing from git or a local clone
+still works too.)
 
 ## The model: install once, provision per project
 
