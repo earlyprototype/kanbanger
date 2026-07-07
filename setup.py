@@ -44,12 +44,12 @@ setup(
     author="Thom Conaty",
     author_email="thomconatydesign@gmail.com",
     license="MIT",
-    url="https://github.com/earlyprototype/kanbanger-partymix",
+    url="https://github.com/earlyprototype/kanbanger",
     project_urls={
-        "Homepage": "https://github.com/earlyprototype/kanbanger-partymix",
-        "Source": "https://github.com/earlyprototype/kanbanger-partymix",
-        "Issues": "https://github.com/earlyprototype/kanbanger-partymix/issues",
-        "Changelog": "https://github.com/earlyprototype/kanbanger-partymix/blob/main/CHANGELOG.md",
+        "Homepage": "https://github.com/earlyprototype/kanbanger",
+        "Source": "https://github.com/earlyprototype/kanbanger",
+        "Issues": "https://github.com/earlyprototype/kanbanger/issues",
+        "Changelog": "https://github.com/earlyprototype/kanbanger/blob/main/CHANGELOG.md",
     },
     keywords=[
         "kanban",
