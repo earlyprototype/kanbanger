@@ -2,6 +2,12 @@
 
 **MCP-first task management** — your AI assistant manages a markdown kanban board, optionally synced to GitHub Projects V2.
 
+<p align="center">
+  <img src="assets/kanbanger_board.gif" alt="A kanbanger-managed GitHub Projects board: cards flow left to right through TODO, DOING, REVIEW and DONE. Nothing reaches DONE without human approval." width="100%">
+</p>
+
+<p align="center"><em>The live GitHub Projects board, driven by kanbanger. A card can't reach <strong>DONE</strong> until it passes <strong>REVIEW</strong> — the human-approval gate, enforced server-side.</em></p>
+
 kanbanger is an **MCP (Model Context Protocol) server** that gives AI assistants structured tools to manage your tasks. The board lives in plain markdown (`_kanban.md`) in your project root; the AI adds, moves, and syncs tasks through validated tools instead of editing files by hand.
 
 ## How it works
