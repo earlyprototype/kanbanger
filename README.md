@@ -67,13 +67,13 @@ pipx install kanbanger   # (once published — PyPI release pending)
 Until the PyPI release lands, install from git:
 
 ```bash
-pipx install git+https://github.com/earlyprototype/kanbanger-partymix.git
+pipx install git+https://github.com/earlyprototype/kanbanger.git
 ```
 
 Plain `pip install` and `uv tool install` work the same way. No git client? Install from the source zip:
 
 ```bash
-pip install https://github.com/earlyprototype/kanbanger-partymix/archive/refs/heads/main.zip
+pip install https://github.com/earlyprototype/kanbanger/archive/refs/heads/main.zip
 ```
 
 This puts four commands on PATH: `kanbanger-mcp` (the MCP server), `kanbanger` (CLI), `kanban-sync`, and `kanban-doctor`. With pipx, run `pipx ensurepath` if the commands don't resolve. With `pip install --user` on Windows, make sure Python's user `Scripts` directory is on PATH (pip prints the exact path in a warning if it isn't).
@@ -198,6 +198,7 @@ Your AI assistant gets these **tools**:
 | `propose_done(title)` | Move AI-completed work to REVIEW |
 | `approve_done(title)` | Approve a REVIEW task to DONE (human decision) |
 | `reject_review(title, reason)` | Send a REVIEW task back with feedback |
+| `doctor(network?)` | Health-check the workspace binding, board file, and sync config |
 | `sync_to_github(dry_run?)` | Push the board to GitHub |
 | `get_sync_status()` | Check sync state |
 
@@ -306,7 +307,7 @@ The hooks are bash scripts; on Windows, Git runs them via Git Bash (bundled with
 
 ### MCP tools not showing
 
-**Fresh machine?** The project's `.mcp.json` targets the global `kanbanger-mcp` command — if kanbanger isn't installed on this machine, the server can't spawn. Install once (`pipx install git+https://github.com/earlyprototype/kanbanger-partymix.git`) and restart. Then:
+**Fresh machine?** The project's `.mcp.json` targets the global `kanbanger-mcp` command — if kanbanger isn't installed on this machine, the server can't spawn. Install once (`pipx install git+https://github.com/earlyprototype/kanbanger.git`) and restart. Then:
 
 1. **Check the config exists:** `ls .mcp.json`
 2. **Check the global command resolves:** `kanbanger-mcp --help`

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-07-07
+
 ### Changed
 - **Distribution renamed `kanbanger-partymix` → `kanbanger` for the PyPI
   release (issue #22).** The import package (`kanbanger`) and all console
@@ -212,7 +214,7 @@ commits land R3 (subprocess timeout) and Finding 7 root-cause work.
 - Token validation in setup wizard
 - No tokens in logs or output
 
-## [Unreleased]
+## Roadmap
 
 ### Planned Features
 - Bidirectional sync (GitHub → Markdown)

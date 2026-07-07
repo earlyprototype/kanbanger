@@ -5,7 +5,7 @@
 Once per machine:
 
 ```
-pipx install git+https://github.com/earlyprototype/kanbanger-partymix.git
+pipx install git+https://github.com/earlyprototype/kanbanger.git
 ```
 
 Once per project, from the project's root directory:
@@ -42,20 +42,20 @@ There is no per-project venv.
 pipx is recommended — isolated install, commands on PATH:
 
 ```
-pipx install git+https://github.com/earlyprototype/kanbanger-partymix.git
+pipx install git+https://github.com/earlyprototype/kanbanger.git
 ```
 
 From a local clone instead:
 
 ```
-pipx install C:/path/to/kanbanger-partymix
+pipx install C:/path/to/kanbanger
 ```
 
 Plain `pip install` (or `uv tool install`) of either form works too. No git
 client on the machine? Install straight from the source zip:
 
 ```bash
-pip install https://github.com/earlyprototype/kanbanger-partymix/archive/refs/heads/main.zip
+pip install https://github.com/earlyprototype/kanbanger/archive/refs/heads/main.zip
 ```
 
 PATH notes: with pipx, run `pipx ensurepath` if the commands don't resolve.
