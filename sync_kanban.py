@@ -259,8 +259,21 @@ class StateManager:
                 tasks = loaded.get("tasks")
                 if not isinstance(tasks, dict):
                     raise ValueError("'tasks' is missing or not an object")
-                if any(not isinstance(task, dict) for task in tasks.values()):
-                    raise ValueError("every task record must be an object")
+                for task in tasks.values():
+                    if not isinstance(task, dict):
+                        raise ValueError("every task record must be an object")
+                    if not isinstance(task.get("item_id"), str) or not task["item_id"]:
+                        raise ValueError(
+                            "every task record must contain a non-empty string "
+                            "'item_id'"
+                        )
+                    if "status" not in task or not (
+                        task["status"] is None or isinstance(task["status"], str)
+                    ):
+                        raise ValueError(
+                            "every task record must contain a string or null "
+                            "'status'"
+                        )
             except OSError as exc:
                 raise ConfigurationError(
                     f"Unable to read sync state: {self.state_file} ({exc})"

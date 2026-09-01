@@ -129,6 +129,17 @@ def test_mcp_preview_does_not_recover_corrupt_state_on_disk(tmp_path, monkeypatc
         "[]",
         "{}",
         json.dumps({"tasks": {"Preview task": []}}),
+        json.dumps({"tasks": {"Preview task": {}}}),
+        json.dumps({
+            "tasks": {"Preview task": {"item_id": "", "status": "Todo"}}
+        }),
+        json.dumps({
+            "tasks": {"Preview task": {"item_id": 1, "status": "Todo"}}
+        }),
+        json.dumps({"tasks": {"Preview task": {"item_id": "PVTI_x"}}}),
+        json.dumps({
+            "tasks": {"Preview task": {"item_id": "PVTI_x", "status": 1}}
+        }),
     ],
 )
 def test_state_preview_rejects_invalid_structure_without_writing(
@@ -143,6 +154,25 @@ def test_state_preview_rejects_invalid_structure_without_writing(
 
     assert state_path.read_text(encoding="utf-8") == state_text
     assert list(tmp_path.glob(".kanban.json.corrupt-*")) == []
+
+
+def test_state_load_accepts_pending_status_and_extra_fields(tmp_path):
+    """A created item may remain pending while its status mutation retries."""
+    state_path = tmp_path / ".kanban.json"
+    expected = {
+        "tasks": {
+            "Preview task": {
+                "item_id": "PVTI_x",
+                "status": None,
+                "future_field": "preserved",
+            }
+        }
+    }
+    state_path.write_text(json.dumps(expected), encoding="utf-8")
+
+    loaded = StateManager(str(tmp_path / "_kanban.md")).load(read_only=True)
+
+    assert loaded["tasks"] == expected["tasks"]
 
 
 def test_mcp_preview_rejects_invalid_utf8_state_without_writing(tmp_path, monkeypatch):

@@ -258,7 +258,7 @@ def test_touchpoint_idempotent_second_run_is_noop(tmp_path: Path):
 def test_provision_ignores_all_local_runtime_files_idempotently(tmp_path: Path):
     """Provisioning leaves sync state, secrets, and local tooling untracked."""
     gitignore_path = tmp_path / ".gitignore"
-    gitignore_path.write_text(".DS_Store\n", encoding="utf-8")
+    gitignore_path.write_text(".env\n", encoding="utf-8")
 
     provision_project(tmp_path)
     second = provision_project(tmp_path)
@@ -268,7 +268,7 @@ def test_provision_ignores_all_local_runtime_files_idempotently(tmp_path: Path):
         ".claude/settings.local.json", ".venv/",
     ]
     entries = gitignore_path.read_text(encoding="utf-8").splitlines()
-    assert entries == [".DS_Store", *expected_ignored]
+    assert entries == expected_ignored
     assert all(entries.count(entry) == 1 for entry in expected_ignored)
     assert any(".gitignore" in note for note in second.already_present)
     assert all(".gitignore" not in note for note in second.updated)
