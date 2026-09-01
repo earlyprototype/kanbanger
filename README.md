@@ -128,7 +128,7 @@ AI: [approve_done] ✅ Done
 
 ```bash
 # Edit _kanban.md in your editor, then:
-kanban-sync _kanban.md --dry-run   # preview
+kanban-sync _kanban.md --dry-run   # local CREATE/UPDATE/ARCHIVE plan; no credentials needed
 kanban-sync _kanban.md             # sync to GitHub
 ```
 
@@ -174,7 +174,7 @@ Three values: `GITHUB_TOKEN`, `GITHUB_REPO` (`owner/repo`), and (recommended) `G
 ### First sync
 
 1. Restart the Claude session so the MCP server picks up the new env values.
-2. Ask your assistant to verify the setup — it can run a dry-run sync (`sync_to_github` with `dry_run`) and report what would change. (`kanban-doctor` remains the manual/CI diagnostic.)
+2. Ask your assistant to run a dry-run sync (`sync_to_github` with `dry_run`). It returns the local CREATE/UPDATE/ARCHIVE plan without credentials, network access, or a `.kanban.json` write. (`kanban-doctor` remains the manual/CI diagnostic.)
 3. Real run: ask for a sync — `sync_to_github()` creates draft issues for new tasks, archives removed ones, and writes the `.kanban.json` state sidecar. (CLI: `kanban-sync _kanban.md`.)
 
 ## Commands
@@ -184,7 +184,7 @@ Three values: `GITHUB_TOKEN`, `GITHUB_REPO` (`owner/repo`), and (recommended) `G
 | `kanbanger init` | Provision a project (board + `.mcp.json` + touchpoint) |
 | `kanban-doctor` | Preflight / diagnose a project's install and sync config |
 | `kanban-doctor --local-only` | Assert a board is local-only (missing sync config skips, not fails) |
-| `kanban-sync _kanban.md --dry-run` | Preview sync changes (safe) |
+| `kanban-sync _kanban.md --dry-run` | Print the local CREATE/UPDATE/ARCHIVE plan (no GitHub configuration or network access) |
 | `kanban-sync _kanban.md` | Sync to GitHub |
 | `python -m kanbanger --help` | MCP server options |
 
@@ -205,7 +205,7 @@ Your AI assistant gets these **tools**:
 | `approve_done(title)` | Approve a REVIEW task to DONE (human decision) |
 | `reject_review(title, reason)` | Send a REVIEW task back with feedback |
 | `doctor(network?)` | Health-check the workspace binding, board file, and sync config |
-| `sync_to_github(dry_run?)` | Push the board to GitHub |
+| `sync_to_github(dry_run?)` | Preview locally with `dry_run`; otherwise sync to GitHub |
 | `get_sync_status()` | Check sync state |
 
 These **resources** (always visible):
@@ -260,7 +260,7 @@ And these **prompts**:
 
 ### `.kanban.json` (sync state sidecar)
 
-Created next to the board on first sync. It pairs local task titles with their GitHub item ids so re-syncs update instead of duplicate. It's machine-state, not content — **add it to `.gitignore`**. If it's deleted, the next sync re-creates state (and can duplicate items already on the Project), so leave it alone.
+Created next to the board on first real sync. It pairs local task titles with their GitHub item ids so re-syncs update instead of duplicate. It's machine-state, not content — provisioning already adds it to `.gitignore`. If it's deleted, the next sync re-creates state (and can duplicate items already on the Project), so leave it alone.
 
 ### The board-id marker
 

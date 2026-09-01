@@ -125,7 +125,11 @@ def _classify_sync_stderr(stderr: str) -> str:
             return ERROR_BOARD_KEY_MISMATCH
         if body.startswith("File not found"):
             return ERROR_KANBAN_NOT_FOUND
-        if "GitHub API returned status" in body or body.startswith("GraphQL errors"):
+        if (
+            body.startswith("GitHub API returned")
+            or body.startswith("GraphQL errors")
+            or body.startswith("GitHub API request failed")
+        ):
             return ERROR_GITHUB_API
         if "No projects found" in body or "Project #" in body:
             return ERROR_PROJECT_NOT_FOUND
@@ -787,7 +791,8 @@ def register_tools(server: FastMCP):
         Sync the kanban board to GitHub Projects V2.
         
         Args:
-            dry_run: If True, shows what would be synced without making changes (default: False)
+            dry_run: If True, returns the local sync plan without configuration,
+                network access, or state writes (default: False)
         
         Returns:
             Sync results or error message
@@ -796,7 +801,7 @@ def register_tools(server: FastMCP):
             sync_to_github(dry_run=True)  # Preview changes
             sync_to_github()  # Actually sync
         
-        Requirements:
+        Real-sync requirements:
             - GITHUB_TOKEN environment variable must be set
             - GITHUB_REPO environment variable must be set
             - GITHUB_PROJECT_NUMBER environment variable (optional, will auto-detect)
@@ -814,6 +819,34 @@ def register_tools(server: FastMCP):
                 f"Kanban board not found at {kanban_path}",
                 kanban_path=kanban_path,
             )
+
+        if dry_run:
+            from kanban_io import read_board_key
+            from sync_kanban import (
+                ConfigurationError,
+                LocalBoard,
+                StateManager,
+                _flatten_local_tasks,
+                build_sync_plan,
+            )
+
+            board = LocalBoard(kanban_path)
+            state = StateManager(kanban_path)
+            try:
+                state.load(read_only=True)
+            except ConfigurationError as exc:
+                return _error(ERROR_CONFIGURATION, str(exc))
+            try:
+                state.verify_board_key(read_board_key(kanban_path))
+            except ConfigurationError as exc:
+                return _error(ERROR_BOARD_KEY_MISMATCH, str(exc))
+            try:
+                plan = build_sync_plan(
+                    _flatten_local_tasks(board.parse()), state.state["tasks"]
+                )
+            except ConfigurationError as exc:
+                return _error(ERROR_READ_FAILED, str(exc))
+            return _ok(mode="preview", plan=plan)
 
         # Check for required environment variables
         if not os.getenv("GITHUB_TOKEN"):
@@ -834,9 +867,6 @@ def register_tools(server: FastMCP):
         # Audit R4: use sys.executable instead of bare "python" so the
         # subprocess always runs under the same interpreter as the MCP server.
         cmd = [sys.executable, "-m", "sync_kanban", kanban_path]
-        if dry_run:
-            cmd.append("--dry-run")
-
         def _drain(stream, sink):
             try:
                 for chunk in iter(stream.readline, ''):
@@ -941,7 +971,11 @@ def register_tools(server: FastMCP):
             return json.dumps({
                 "synced_tasks": len(state.get("tasks", {})),
                 "state_file": state_path,
-                "github_items": list(state.get("tasks", {}).keys())
+                "github_items": list(state.get("tasks", {}).keys()),
+                "github_item_ids": [
+                    item.get("item_id")
+                    for item in state.get("tasks", {}).values()
+                ],
             }, indent=2)
         except Exception as e:
             return json.dumps({
@@ -1329,7 +1363,7 @@ def register_tools(server: FastMCP):
           - `.mcp.json`: wires the project to the global `kanbanger-mcp`
             command, with EMPTY GitHub-sync placeholders. Written only if
             absent; an existing `.mcp.json` is left untouched.
-          - `.gitignore`: ensures a stray `.venv/` stays out of version control.
+          - `.gitignore`: ensures local runtime files stay out of version control.
 
         GitHub sync: the GITHUB_TOKEN / GITHUB_REPO / GITHUB_PROJECT_NUMBER
         slots in `.mcp.json` are empty `${VAR:-}` placeholders. NO secret is

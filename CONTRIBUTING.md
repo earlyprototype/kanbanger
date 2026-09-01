@@ -296,8 +296,8 @@ kanbanger-partymix/
 **Flow:**
 1. Parse `_kanban.md` → extract tasks + columns
 2. Load `.kanban.json` → get existing GitHub item IDs
-3. Connect to GitHub → fetch current project state
-4. Diff local vs remote → determine changes
+3. Connect to GitHub → resolve the target project and Status field
+4. Compare the local board with `.kanban.json` → determine changes; missing or reset state can duplicate remote cards
 5. Apply mutations → create/update/archive on GitHub
 6. Save state → update `.kanban.json`
 

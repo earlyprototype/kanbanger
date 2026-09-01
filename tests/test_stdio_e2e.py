@@ -65,6 +65,20 @@ async def _drive(workspace: str) -> dict:
     return out
 
 
+async def _preview(workspace: str) -> dict:
+    env = dict(os.environ)
+    env["KANBANGER_WORKSPACE"] = workspace
+    env.pop("GITHUB_TOKEN", None)
+    env.pop("GITHUB_REPO", None)
+    params = StdioServerParameters(
+        command=sys.executable, args=["-m", "kanbanger"], env=env
+    )
+    async with stdio_client(params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            return _payload(await session.call_tool("sync_to_github", {"dry_run": True}))
+
+
 def test_stdio_tool_lifecycle_and_gate(tmp_path: Path):
     """Full lifecycle + gate enforcement over the real stdio transport."""
     (tmp_path / "_kanban.md").write_text(BOARD, encoding="utf-8")
@@ -82,3 +96,18 @@ def test_stdio_tool_lifecycle_and_gate(tmp_path: Path):
     assert out["gate"]["error_code"] == "gate_violation"
     # the read-only resource reflects board state
     assert "E2E task" in out["board"]
+
+
+def test_stdio_sync_preview_needs_no_github_configuration(tmp_path: Path):
+    """Preview returns the local plan and cannot create sync state."""
+    (tmp_path / "_kanban.md").write_text(
+        BOARD.replace("## TODO\n", "## TODO\n* [ ] Preview task\n"),
+        encoding="utf-8",
+    )
+
+    payload = asyncio.run(_preview(str(tmp_path)))
+
+    assert payload["success"] is True
+    assert payload["mode"] == "preview"
+    assert payload["plan"]["operations"][0]["action"] == "CREATE"
+    assert not (tmp_path / ".kanban.json").exists()

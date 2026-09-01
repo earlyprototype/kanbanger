@@ -195,13 +195,13 @@ def register_resources(server: FastMCP):
             with open(state_path, 'r', encoding='utf-8') as f:
                 state = json.load(f)
             
-            items = state.get("items", {})
+            items = state.get("tasks", {})
             
             return json.dumps({
                 "synced": True,
                 "synced_tasks": len(items),
                 "state_file": state_path,
-                "github_item_ids": list(items.values()),
+                "github_item_ids": [item.get("item_id") for item in items.values()],
                 "local_task_titles": list(items.keys())
             }, indent=2)
         except Exception as e:
