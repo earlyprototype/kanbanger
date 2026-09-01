@@ -21,6 +21,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -30,6 +31,8 @@ from typing import Iterator, Optional, Tuple
 _LOCK_FILENAME = ".kanban.lock"
 _STATE_FILENAME = ".kanban.json"
 _KANBAN_FILENAME = "_kanban.md"
+_WINDOWS_REPLACE_ATTEMPTS = 5
+_WINDOWS_REPLACE_RETRY_DELAY_SECONDS = 0.05
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +253,10 @@ def atomic_write_text(
     bytes to disk, then os.replace() onto the final name. os.replace is
     atomic at the filesystem level (Windows since Python 3.3, POSIX always)
     when both paths are on the same volume — placing the tempfile alongside
-    the target guarantees that.
+    the target guarantees that. Replacement is atomic once successful.
+    Ordinary Windows read handles can temporarily block replacement;
+    Kanbanger retries those failures for at most 200 ms. Permanent failures
+    are re-raised unchanged.
 
     `newline` is passed straight to open(): the default None keeps the
     historical behavior (\\n translated to the platform line separator);
@@ -268,7 +274,17 @@ def atomic_write_text(
             f.write(content)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp_path, path)
+        for attempt in range(_WINDOWS_REPLACE_ATTEMPTS):
+            try:
+                os.replace(tmp_path, path)
+                break
+            except PermissionError:
+                if (
+                    sys.platform != "win32"
+                    or attempt == _WINDOWS_REPLACE_ATTEMPTS - 1
+                ):
+                    raise
+                time.sleep(_WINDOWS_REPLACE_RETRY_DELAY_SECONDS)
     except Exception:
         try:
             os.unlink(tmp_path)
