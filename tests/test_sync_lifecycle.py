@@ -102,6 +102,11 @@ def test_mcp_preview_does_not_recover_corrupt_state_on_disk(tmp_path, monkeypatc
     corrupt = b"{ broken"
     state.write_bytes(corrupt)
     monkeypatch.setenv("KANBANGER_WORKSPACE", str(tmp_path))
+    monkeypatch.setattr(
+        requests,
+        "post",
+        lambda *args, **kwargs: pytest.fail("preview attempted HTTP"),
+    )
     from tests.conftest import _StubMCPServer
     from kanbanger.tools import register_tools
 
