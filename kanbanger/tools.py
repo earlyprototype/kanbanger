@@ -840,12 +840,13 @@ def register_tools(server: FastMCP):
                 state.verify_board_key(read_board_key(kanban_path))
             except ConfigurationError as exc:
                 return _error(ERROR_BOARD_KEY_MISMATCH, str(exc))
-            return _ok(
-                mode="preview",
-                plan=build_sync_plan(
+            try:
+                plan = build_sync_plan(
                     _flatten_local_tasks(board.parse()), state.state["tasks"]
-                ),
-            )
+                )
+            except ConfigurationError as exc:
+                return _error(ERROR_READ_FAILED, str(exc))
+            return _ok(mode="preview", plan=plan)
 
         # Check for required environment variables
         if not os.getenv("GITHUB_TOKEN"):

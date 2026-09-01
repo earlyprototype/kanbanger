@@ -197,7 +197,9 @@ def ensure_mcp_json(project_dir: Path, result: ProvisionResult) -> None:
 # ---------------------------------------------------------------------------
 
 
-def ensure_gitignore_has_venv(project_dir: Path, result: ProvisionResult | None = None) -> None:
+def ensure_gitignore_has_venv(
+    project_dir: Path, result: ProvisionResult | None = None
+) -> None:
     """Idempotently ensure local runtime files are gitignored.
 
     A stray local venv is harmless if you never make one, but if you do, it
@@ -208,13 +210,19 @@ def ensure_gitignore_has_venv(project_dir: Path, result: ProvisionResult | None 
     block = f"\n{GITIGNORE_HEADER}\n" + "\n".join(GITIGNORE_ENTRIES) + "\n"
     if gitignore.exists():
         content = gitignore.read_text(encoding="utf-8")
-        missing = [entry for entry in GITIGNORE_ENTRIES if entry not in content.splitlines()]
+        missing = [
+            entry for entry in GITIGNORE_ENTRIES if entry not in content.splitlines()
+        ]
         if not missing:
             if result is not None:
-                result.already_present.append(f"{GITIGNORE_FILENAME} (local runtime files already ignored)")
+                result.already_present.append(
+                    f"{GITIGNORE_FILENAME} (local runtime files already ignored)"
+                )
             return
         sep = "" if content.endswith("\n") else "\n"
-        gitignore.write_text(content + sep + "\n".join(missing) + "\n", encoding="utf-8")
+        gitignore.write_text(
+            content + sep + "\n".join(missing) + "\n", encoding="utf-8"
+        )
         if result is not None:
             result.updated.append(f"{GITIGNORE_FILENAME} (added local runtime files)")
     else:
@@ -305,7 +313,9 @@ def _upsert_touchpoint(target: Path, block: str) -> str:
     return "appended"
 
 
-def ensure_claude_md_has_kanbanger(project_dir: Path, result: ProvisionResult | None = None) -> None:
+def ensure_claude_md_has_kanbanger(
+    project_dir: Path, result: ProvisionResult | None = None
+) -> None:
     """Idempotently add (or refresh) the Kanbanger stanza in <project>/CLAUDE.md."""
     claude_md = project_dir / CLAUDE_MD_FILENAME
     block = build_claude_md_block(project_dir)
@@ -321,7 +331,9 @@ def ensure_claude_md_has_kanbanger(project_dir: Path, result: ProvisionResult | 
         result.already_present.append(f"{note} (already up to date)")
 
 
-def ensure_agents_md_has_kanbanger(project_dir: Path, result: ProvisionResult | None = None) -> None:
+def ensure_agents_md_has_kanbanger(
+    project_dir: Path, result: ProvisionResult | None = None
+) -> None:
     """Mirror the touchpoint into AGENTS.md, but only if AGENTS.md already exists.
 
     AGENTS.md is the cross-tool agent-guidance convention (Cursor, etc.). We do
@@ -387,7 +399,9 @@ def _default_project_name(project_dir: Path) -> str:
     return name if name else "Project"
 
 
-def scaffold_kanban_board(project_dir: Path, result: ProvisionResult | None = None) -> None:
+def scaffold_kanban_board(
+    project_dir: Path, result: ProvisionResult | None = None
+) -> None:
     """Create `_kanban.md` if absent, and ensure it carries a minted board key.
 
     Board-content rules (ADR 0002, issue #15 step 4 — collision-proof

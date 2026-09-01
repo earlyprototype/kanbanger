@@ -152,8 +152,13 @@ class LocalBoard:
         text so the description survives to GitHub on the first
         occurrence; only the dedup key is the stripped form.
         """
-        with open(self.file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
+        try:
+            with open(self.file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ConfigurationError(
+                f"Unable to read kanban board: {self.file_path} ({exc})"
+            ) from exc
 
         tasks = {}
         seen_per_section: Dict[str, set] = {}
@@ -234,23 +239,41 @@ class StateManager:
     def load(self, *, read_only: bool = False) -> Dict:
         """Load state from .kanban.json if it exists.
 
-        R7: on a corrupt JSON parse, copy the bad file aside (preserving
-        it for postmortem) and reset to an empty default state. Lets the
-        tool keep running rather than crashing on a partial write or
-        manual edit; the user loses sync history but no further damage
-        accumulates. Recovery via markdown-rebuild is deferred (would
-        warrant its own audit item). ``read_only=True`` refuses corrupt state
+        Corrupt JSON or state structure is copied aside and reset on a real
+        sync. The reset can duplicate existing remote cards because it treats
+        the board as never synced. ``read_only=True`` refuses corrupt state
         without changing it or creating a recovery copy.
         """
-        if self.state_file.exists():
+        try:
+            state_exists = self.state_file.exists()
+        except OSError as exc:
+            raise ConfigurationError(
+                f"Unable to read sync state: {self.state_file} ({exc})"
+            ) from exc
+        if state_exists:
             try:
                 with open(self.state_file, 'r', encoding='utf-8') as f:
-                    self.state = json.load(f)
-            except json.JSONDecodeError as exc:
+                    loaded = json.load(f)
+                if not isinstance(loaded, dict):
+                    raise ValueError("top-level JSON value is not an object")
+                tasks = loaded.get("tasks")
+                if not isinstance(tasks, dict):
+                    raise ValueError("'tasks' is missing or not an object")
+                if any(not isinstance(task, dict) for task in tasks.values()):
+                    raise ValueError("every task record must be an object")
+            except OSError as exc:
+                raise ConfigurationError(
+                    f"Unable to read sync state: {self.state_file} ({exc})"
+                ) from exc
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+                if isinstance(exc, json.JSONDecodeError):
+                    detail = f"{exc.msg} at line {exc.lineno} col {exc.colno}"
+                else:
+                    detail = str(exc)
                 if read_only:
                     raise ConfigurationError(
                         f"Sync state is corrupt: {self.state_file} "
-                        f"({exc.msg} at line {exc.lineno} col {exc.colno})"
+                        f"({detail})"
                     ) from exc
                 timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
                 backup_path = self.state_file.with_name(
@@ -267,7 +290,7 @@ class StateManager:
                     backup_note = f"backed up to {backup_path}"
                 print(
                     f"Warning: .kanban.json is corrupt "
-                    f"({exc.msg} at line {exc.lineno} col {exc.colno}); "
+                    f"({detail}); "
                     f"{backup_note}. Resetting to empty state — sync "
                     f"history is lost; subsequent sync runs will treat "
                     f"the board as never-synced.",
@@ -281,13 +304,17 @@ class StateManager:
                     "tasks": {},
                 }
                 return self.state
+            self.state = loaded
             # R8: backwards-compat. Pre-R8 state files have no
             # schema_version; v0 and v1 are structurally identical, so
             # silently upgrade in-memory (next save persists the field).
             loaded_version = self.state.get("schema_version")
             if loaded_version is None:
                 self.state["schema_version"] = SCHEMA_VERSION
-            elif loaded_version > SCHEMA_VERSION:
+            elif (
+                isinstance(loaded_version, (int, float))
+                and loaded_version > SCHEMA_VERSION
+            ):
                 print(
                     f"Warning: .kanban.json schema_version={loaded_version} "
                     f"is newer than this kanbanger version "

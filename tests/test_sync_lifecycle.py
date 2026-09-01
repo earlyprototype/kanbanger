@@ -9,6 +9,7 @@ import pytest
 import requests
 
 from sync_kanban import (
+    ConfigurationError,
     GitHubAPIError,
     GitHubClient,
     LocalBoard,
@@ -120,6 +121,76 @@ def test_mcp_preview_does_not_recover_corrupt_state_on_disk(tmp_path, monkeypatc
     assert payload["error_code"] == "configuration_error"
     assert state.read_bytes() == corrupt
     assert list(tmp_path.glob(".kanban.json.corrupt-*")) == []
+
+
+@pytest.mark.parametrize(
+    "state_text",
+    [
+        "[]",
+        "{}",
+        json.dumps({"tasks": {"Preview task": []}}),
+    ],
+)
+def test_state_preview_rejects_invalid_structure_without_writing(
+    tmp_path, state_text
+):
+    """A missing dict state/tasks/task record must not become a fresh sync."""
+    state_path = tmp_path / ".kanban.json"
+    state_path.write_text(state_text, encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match="Sync state is corrupt"):
+        StateManager(str(tmp_path / "_kanban.md")).load(read_only=True)
+
+    assert state_path.read_text(encoding="utf-8") == state_text
+    assert list(tmp_path.glob(".kanban.json.corrupt-*")) == []
+
+
+def test_mcp_preview_rejects_invalid_utf8_state_without_writing(tmp_path, monkeypatch):
+    """Invalid state bytes are a structured, read-only configuration failure."""
+    (tmp_path / "_kanban.md").write_text("# Board\n\n## TODO\n", encoding="utf-8")
+    state_path = tmp_path / ".kanban.json"
+    corrupt = b"\xff"
+    state_path.write_bytes(corrupt)
+    monkeypatch.setenv("KANBANGER_WORKSPACE", str(tmp_path))
+    from tests.conftest import _StubMCPServer
+    from kanbanger.tools import register_tools
+
+    server = _StubMCPServer()
+    register_tools(server)
+    payload = json.loads(server.tools["sync_to_github"](dry_run=True))
+
+    assert payload["error_code"] == "configuration_error"
+    assert state_path.read_bytes() == corrupt
+    assert list(tmp_path.glob(".kanban.json.corrupt-*")) == []
+
+
+def test_mcp_preview_reports_invalid_utf8_board_as_read_failure(tmp_path, monkeypatch):
+    """A board read failure must remain distinct from state configuration."""
+    (tmp_path / "_kanban.md").write_bytes(b"\xff")
+    monkeypatch.setenv("KANBANGER_WORKSPACE", str(tmp_path))
+    from tests.conftest import _StubMCPServer
+    from kanbanger.tools import register_tools
+
+    server = _StubMCPServer()
+    register_tools(server)
+    payload = json.loads(server.tools["sync_to_github"](dry_run=True))
+
+    assert payload["error_code"] == "read_failed"
+
+
+def test_state_load_backs_up_and_resets_invalid_structure(tmp_path, capsys):
+    """Real sync preserves corrupt state but starts clean, risking duplicates."""
+    state_path = tmp_path / ".kanban.json"
+    corrupt = b"[]"
+    state_path.write_bytes(corrupt)
+
+    state = StateManager(str(tmp_path / "_kanban.md")).load()
+
+    assert state["tasks"] == {}
+    backups = list(tmp_path.glob(".kanban.json.corrupt-*"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == corrupt
+    assert "treat the board as never-synced" in capsys.readouterr().err
 
 
 def test_mcp_preview_import_does_not_load_cwd_or_workspace_dotenv(

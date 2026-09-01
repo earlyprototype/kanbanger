@@ -53,7 +53,13 @@ def test_fresh_board_parses_as_five_empty_columns(tmp_path: Path):
     board_path = tmp_path / "_kanban.md"
     board_path.write_text(build_kanban_board("Demo"), encoding="utf-8")
 
-    assert all(not tasks for tasks in LocalBoard(str(board_path)).parse().values())
+    assert LocalBoard(str(board_path)).parse() == {
+        "Backlog": [],
+        "Todo": [],
+        "InProgress": [],
+        "Review": [],
+        "Done": [],
+    }
 
 
 def test_board_scaffolded_when_absent(tmp_path: Path):
@@ -251,15 +257,21 @@ def test_touchpoint_idempotent_second_run_is_noop(tmp_path: Path):
 
 def test_provision_ignores_all_local_runtime_files_idempotently(tmp_path: Path):
     """Provisioning leaves sync state, secrets, and local tooling untracked."""
-    provision_project(tmp_path)
-    provision_project(tmp_path)
+    gitignore_path = tmp_path / ".gitignore"
+    gitignore_path.write_text(".DS_Store\n", encoding="utf-8")
 
-    expected_ignored = {
+    provision_project(tmp_path)
+    second = provision_project(tmp_path)
+
+    expected_ignored = [
         ".env", ".env.local", ".kanban.json", ".kanban.lock",
         ".claude/settings.local.json", ".venv/",
-    }
-    gitignore_path = tmp_path / ".gitignore"
-    assert expected_ignored <= set(gitignore_path.read_text().splitlines())
+    ]
+    entries = gitignore_path.read_text(encoding="utf-8").splitlines()
+    assert entries == [".DS_Store", *expected_ignored]
+    assert all(entries.count(entry) == 1 for entry in expected_ignored)
+    assert any(".gitignore" in note for note in second.already_present)
+    assert all(".gitignore" not in note for note in second.updated)
 
 
 def test_touchpoint_appended_without_clobbering_existing(tmp_path: Path):
