@@ -5,7 +5,17 @@ import os
 import subprocess
 import sys
 
-from sync_kanban import GitHubClient, LocalBoard, StateManager, Syncer, build_sync_plan
+import pytest
+import requests
+
+from sync_kanban import (
+    GitHubAPIError,
+    GitHubClient,
+    LocalBoard,
+    StateManager,
+    Syncer,
+    build_sync_plan,
+)
 
 
 def test_build_sync_plan_orders_local_changes_before_removed_state():
@@ -62,6 +72,93 @@ def test_dry_run_prints_plan_without_github_configuration(tmp_path):
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["operations"][0]["action"] == "CREATE"
     assert not (tmp_path / ".kanban.json").exists()
+
+
+def test_cli_preview_does_not_recover_corrupt_state_on_disk(tmp_path):
+    """Previewing corrupt state must not create a backup or alter the source."""
+    board = tmp_path / "_kanban.md"
+    board.write_text("# Board\n\n## TODO\n* [ ] Preview task\n", encoding="utf-8")
+    state = tmp_path / ".kanban.json"
+    corrupt = b"{ broken"
+    state.write_bytes(corrupt)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "sync_kanban", str(board), "--dry-run"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert state.read_bytes() == corrupt
+    assert list(tmp_path.glob(".kanban.json.corrupt-*")) == []
+
+
+def test_mcp_preview_does_not_recover_corrupt_state_on_disk(tmp_path, monkeypatch):
+    """The MCP preview path has the same no-write contract as the CLI."""
+    board = tmp_path / "_kanban.md"
+    board.write_text("# Board\n\n## TODO\n* [ ] Preview task\n", encoding="utf-8")
+    state = tmp_path / ".kanban.json"
+    corrupt = b"{ broken"
+    state.write_bytes(corrupt)
+    monkeypatch.setenv("KANBANGER_WORKSPACE", str(tmp_path))
+    from tests.conftest import _StubMCPServer
+    from kanbanger.tools import register_tools
+
+    server = _StubMCPServer()
+    register_tools(server)
+    payload = json.loads(server.tools["sync_to_github"](dry_run=True))
+
+    assert payload["success"] is True
+    assert state.read_bytes() == corrupt
+    assert list(tmp_path.glob(".kanban.json.corrupt-*")) == []
+
+
+def test_cli_preview_rejects_copied_board_state(tmp_path):
+    """Preview must not offer a plan that real sync refuses to execute."""
+    board = tmp_path / "_kanban.md"
+    board.write_text(
+        "# Board\n<!-- kanbanger:board-id: " + "b" * 32 + " -->\n\n## TODO\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".kanban.json").write_text(
+        json.dumps({"schema_version": 1, "board_key": "a" * 32, "tasks": {}}),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-m", "sync_kanban", str(board), "--dry-run"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 1
+    assert result.stderr.startswith("Error: sync state belongs to a different board")
+    assert result.stdout == ""
+
+
+def test_mcp_preview_rejects_copied_board_state(tmp_path, monkeypatch):
+    """MCP preview returns the existing structured copied-board refusal."""
+    board = tmp_path / "_kanban.md"
+    board.write_text(
+        "# Board\n<!-- kanbanger:board-id: " + "b" * 32 + " -->\n\n## TODO\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".kanban.json").write_text(
+        json.dumps({"schema_version": 1, "board_key": "a" * 32, "tasks": {}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("KANBANGER_WORKSPACE", str(tmp_path))
+    from tests.conftest import _StubMCPServer
+    from kanbanger.tools import register_tools
+
+    server = _StubMCPServer()
+    register_tools(server)
+    payload = json.loads(server.tools["sync_to_github"](dry_run=True))
+
+    assert payload["success"] is False
+    assert payload["error_code"] == "board_key_mismatch"
 
 
 def test_sync_executes_local_plan_without_remote_reconciliation(tmp_path, monkeypatch):
@@ -188,6 +285,48 @@ def test_github_client_uses_a_finite_request_timeout(monkeypatch):
 
     assert len(received) == 1
     assert isinstance(received[0], (int, float)) and 0 < received[0] < float("inf")
+
+
+def test_github_client_translates_request_failures(monkeypatch):
+    """Transport failures must cross the client boundary as GitHubAPIError."""
+    def fail_post(*args, **kwargs):
+        raise requests.Timeout("timed out")
+
+    monkeypatch.setattr("requests.post", fail_post)
+
+    with pytest.raises(GitHubAPIError, match="GitHub API request failed") as caught:
+        GitHubClient("token")._query("query { viewer { login } }", {})
+
+    assert isinstance(caught.value.__cause__, requests.Timeout)
+
+
+def test_mcp_classifies_github_request_failures():
+    """Translated transport failures must retain the GitHub API error code."""
+    from kanbanger.tools import ERROR_GITHUB_API, _classify_sync_stderr
+
+    assert _classify_sync_stderr(
+        "Error: GitHub API request failed: timed out\n"
+    ) == ERROR_GITHUB_API
+
+
+def test_malformed_repo_is_a_formatted_configuration_error(tmp_path):
+    """Malformed nonempty repo config must not leak split ValueError traces."""
+    board = tmp_path / "_kanban.md"
+    board.write_text("# Board\n\n## TODO\n", encoding="utf-8")
+    env = dict(os.environ)
+    env["GITHUB_TOKEN"] = "test-token"
+
+    result = subprocess.run(
+        [sys.executable, "-m", "sync_kanban", str(board), "--repo", "owner//repo"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+
+    assert result.returncode == 1
+    assert result.stderr.startswith("Error: GITHUB_REPO must be 'owner/repo'")
+    assert "Traceback" not in result.stderr
 
 
 def test_installed_sync_command_formats_expected_errors_without_tracebacks(tmp_path):

@@ -125,7 +125,11 @@ def _classify_sync_stderr(stderr: str) -> str:
             return ERROR_BOARD_KEY_MISMATCH
         if body.startswith("File not found"):
             return ERROR_KANBAN_NOT_FOUND
-        if "GitHub API returned status" in body or body.startswith("GraphQL errors"):
+        if (
+            "GitHub API returned status" in body
+            or body.startswith("GraphQL errors")
+            or body.startswith("GitHub API request failed")
+        ):
             return ERROR_GITHUB_API
         if "No projects found" in body or "Project #" in body:
             return ERROR_PROJECT_NOT_FOUND
@@ -817,19 +821,27 @@ def register_tools(server: FastMCP):
             )
 
         if dry_run:
-            from sync_kanban import LocalBoard, StateManager, build_sync_plan
+            from kanban_io import read_board_key
+            from sync_kanban import (
+                ConfigurationError,
+                LocalBoard,
+                StateManager,
+                _flatten_local_tasks,
+                build_sync_plan,
+            )
 
             board = LocalBoard(kanban_path)
             state = StateManager(kanban_path)
-            state.load()
-            local_flat = {
-                task["title"]: column
-                for column, tasks in board.parse().items()
-                for task in tasks
-            }
+            state.load(read_only=True)
+            try:
+                state.verify_board_key(read_board_key(kanban_path))
+            except ConfigurationError as exc:
+                return _error(ERROR_BOARD_KEY_MISMATCH, str(exc))
             return _ok(
                 mode="preview",
-                plan=build_sync_plan(local_flat, state.state["tasks"]),
+                plan=build_sync_plan(
+                    _flatten_local_tasks(board.parse()), state.state["tasks"]
+                ),
             )
 
         # Check for required environment variables

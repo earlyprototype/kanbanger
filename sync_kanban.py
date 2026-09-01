@@ -229,7 +229,7 @@ class StateManager:
             "tasks": {}
         }
 
-    def load(self) -> Dict:
+    def load(self, *, read_only: bool = False) -> Dict:
         """Load state from .kanban.json if it exists.
 
         R7: on a corrupt JSON parse, copy the bad file aside (preserving
@@ -237,32 +237,40 @@ class StateManager:
         tool keep running rather than crashing on a partial write or
         manual edit; the user loses sync history but no further damage
         accumulates. Recovery via markdown-rebuild is deferred (would
-        warrant its own audit item).
+        warrant its own audit item). ``read_only=True`` performs the same
+        in-memory reset without creating the recovery copy.
         """
         if self.state_file.exists():
             try:
                 with open(self.state_file, 'r', encoding='utf-8') as f:
                     self.state = json.load(f)
             except json.JSONDecodeError as exc:
-                timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
-                backup_path = self.state_file.with_name(
-                    f"{self.state_file.name}.corrupt-{timestamp}"
-                )
-                try:
-                    shutil.copy2(self.state_file, backup_path)
-                except Exception as copy_exc:
-                    backup_note = (
-                        f"backup attempt failed: {copy_exc!r}; "
-                        f"original left in place at {self.state_file}"
-                    )
+                if read_only:
+                    backup_note = "left unchanged by read-only load"
                 else:
-                    backup_note = f"backed up to {backup_path}"
+                    timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+                    backup_path = self.state_file.with_name(
+                        f"{self.state_file.name}.corrupt-{timestamp}"
+                    )
+                    try:
+                        shutil.copy2(self.state_file, backup_path)
+                    except Exception as copy_exc:
+                        backup_note = (
+                            f"backup attempt failed: {copy_exc!r}; "
+                            f"original left in place at {self.state_file}"
+                        )
+                    else:
+                        backup_note = f"backed up to {backup_path}"
+                reset_scope = (
+                    "this preview treats the board as never-synced."
+                    if read_only
+                    else "subsequent sync runs will treat the board as never-synced."
+                )
                 print(
                     f"Warning: .kanban.json is corrupt "
                     f"({exc.msg} at line {exc.lineno} col {exc.colno}); "
                     f"{backup_note}. Resetting to empty state — sync "
-                    f"history is lost; subsequent sync runs will treat "
-                    f"the board as never-synced.",
+                    f"history is unavailable; {reset_scope}",
                     file=sys.stderr,
                 )
                 self.state = {
@@ -393,12 +401,15 @@ class GitHubClient:
     
     def _query(self, query: str, variables: Dict) -> Dict:
         """Execute a GraphQL query."""
-        response = self.requests.post(
-            GITHUB_API,
-            headers=self.headers,
-            json={"query": query, "variables": variables},
-            timeout=GITHUB_TIMEOUT_SEC,
-        )
+        try:
+            response = self.requests.post(
+                GITHUB_API,
+                headers=self.headers,
+                json={"query": query, "variables": variables},
+                timeout=GITHUB_TIMEOUT_SEC,
+            )
+        except self.requests.RequestException as exc:
+            raise GitHubAPIError(f"GitHub API request failed: {exc}") from exc
         
         if response.status_code != 200:
             raise GitHubAPIError(
@@ -639,7 +650,10 @@ class Syncer:
     
     def sync(self, repo: str, project_number: Optional[int] = None):
         """Perform the full synchronization."""
-        owner, repo_name = repo.split('/')
+        parts = repo.split('/')
+        if len(parts) != 2 or not all(parts):
+            raise ConfigurationError("GITHUB_REPO must be 'owner/repo'")
+        owner, repo_name = parts
         
         print(f"Parsing {self.board.file_path}...")
         local_tasks = self.board.parse()
@@ -782,7 +796,8 @@ def _main():
 
     if args.dry_run:
         state = StateManager(args.kanban_file)
-        state.load()
+        state.load(read_only=True)
+        state.verify_board_key(read_board_key(args.kanban_file))
         print(json.dumps(build_sync_plan(
             _flatten_local_tasks(board.parse()), state.state["tasks"]
         )))
