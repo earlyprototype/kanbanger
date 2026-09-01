@@ -34,11 +34,13 @@ from kanban_io import (
 # parent-of-source-directory `.env` (e.g. ~/Desktop/AI/.env) and the
 # target project's `.env` is never considered. usecwd=True makes the
 # search start at os.getcwd() so the CWD-closest `.env` wins.
-try:
-    from dotenv import load_dotenv, find_dotenv
+def _load_cli_dotenv() -> None:
+    """Load the CLI cwd's `.env`, where project values override the shell."""
+    try:
+        from dotenv import find_dotenv, load_dotenv
+    except ImportError:
+        return
     load_dotenv(find_dotenv(usecwd=True), override=True)
-except ImportError:
-    pass  # python-dotenv not installed, skip
 
 
 # GitHub GraphQL endpoint
@@ -237,8 +239,8 @@ class StateManager:
         tool keep running rather than crashing on a partial write or
         manual edit; the user loses sync history but no further damage
         accumulates. Recovery via markdown-rebuild is deferred (would
-        warrant its own audit item). ``read_only=True`` performs the same
-        in-memory reset without creating the recovery copy.
+        warrant its own audit item). ``read_only=True`` refuses corrupt state
+        without changing it or creating a recovery copy.
         """
         if self.state_file.exists():
             try:
@@ -246,31 +248,29 @@ class StateManager:
                     self.state = json.load(f)
             except json.JSONDecodeError as exc:
                 if read_only:
-                    backup_note = "left unchanged by read-only load"
-                else:
-                    timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
-                    backup_path = self.state_file.with_name(
-                        f"{self.state_file.name}.corrupt-{timestamp}"
-                    )
-                    try:
-                        shutil.copy2(self.state_file, backup_path)
-                    except Exception as copy_exc:
-                        backup_note = (
-                            f"backup attempt failed: {copy_exc!r}; "
-                            f"original left in place at {self.state_file}"
-                        )
-                    else:
-                        backup_note = f"backed up to {backup_path}"
-                reset_scope = (
-                    "this preview treats the board as never-synced."
-                    if read_only
-                    else "subsequent sync runs will treat the board as never-synced."
+                    raise ConfigurationError(
+                        f"Sync state is corrupt: {self.state_file} "
+                        f"({exc.msg} at line {exc.lineno} col {exc.colno})"
+                    ) from exc
+                timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+                backup_path = self.state_file.with_name(
+                    f"{self.state_file.name}.corrupt-{timestamp}"
                 )
+                try:
+                    shutil.copy2(self.state_file, backup_path)
+                except Exception as copy_exc:
+                    backup_note = (
+                        f"backup attempt failed: {copy_exc!r}; "
+                        f"original left in place at {self.state_file}"
+                    )
+                else:
+                    backup_note = f"backed up to {backup_path}"
                 print(
                     f"Warning: .kanban.json is corrupt "
                     f"({exc.msg} at line {exc.lineno} col {exc.colno}); "
                     f"{backup_note}. Resetting to empty state — sync "
-                    f"history is unavailable; {reset_scope}",
+                    f"history is lost; subsequent sync runs will treat "
+                    f"the board as never-synced.",
                     file=sys.stderr,
                 )
                 self.state = {
@@ -417,7 +417,12 @@ class GitHubClient:
                 f"{response.text}"
             )
 
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise GitHubAPIError(f"GitHub API returned invalid JSON: {exc}") from exc
+        if not isinstance(data, dict):
+            raise GitHubAPIError("GitHub API returned JSON that is not an object")
         if "errors" in data:
             details = "\n".join(
                 f"  - {error.get('message', str(error))}"
@@ -769,6 +774,8 @@ class Syncer:
 
 
 def _main():
+    _load_cli_dotenv()
+
     # Fix console encoding for Windows; 'replace' (R11) so a stray byte cannot raise into the parent's pipe drain.
     if sys.platform == 'win32':
         import codecs

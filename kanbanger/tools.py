@@ -832,7 +832,10 @@ def register_tools(server: FastMCP):
 
             board = LocalBoard(kanban_path)
             state = StateManager(kanban_path)
-            state.load(read_only=True)
+            try:
+                state.load(read_only=True)
+            except ConfigurationError as exc:
+                return _error(ERROR_CONFIGURATION, str(exc))
             try:
                 state.verify_board_key(read_board_key(kanban_path))
             except ConfigurationError as exc:
@@ -1359,7 +1362,7 @@ def register_tools(server: FastMCP):
           - `.mcp.json`: wires the project to the global `kanbanger-mcp`
             command, with EMPTY GitHub-sync placeholders. Written only if
             absent; an existing `.mcp.json` is left untouched.
-          - `.gitignore`: ensures a stray `.venv/` stays out of version control.
+          - `.gitignore`: ensures local runtime files stay out of version control.
 
         GitHub sync: the GITHUB_TOKEN / GITHUB_REPO / GITHUB_PROJECT_NUMBER
         slots in `.mcp.json` are empty `${VAR:-}` placeholders. NO secret is

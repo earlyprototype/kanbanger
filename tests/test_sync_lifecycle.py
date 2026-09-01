@@ -89,7 +89,9 @@ def test_cli_preview_does_not_recover_corrupt_state_on_disk(tmp_path):
         timeout=30,
     )
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 1
+    assert result.stderr.startswith("Error: Sync state is corrupt:")
+    assert result.stdout == ""
     assert state.read_bytes() == corrupt
     assert list(tmp_path.glob(".kanban.json.corrupt-*")) == []
 
@@ -114,9 +116,42 @@ def test_mcp_preview_does_not_recover_corrupt_state_on_disk(tmp_path, monkeypatc
     register_tools(server)
     payload = json.loads(server.tools["sync_to_github"](dry_run=True))
 
-    assert payload["success"] is True
+    assert payload["success"] is False
+    assert payload["error_code"] == "configuration_error"
     assert state.read_bytes() == corrupt
     assert list(tmp_path.glob(".kanban.json.corrupt-*")) == []
+
+
+def test_mcp_preview_import_does_not_load_cwd_or_workspace_dotenv(
+    tmp_path, monkeypatch
+):
+    """Lazy planner imports must not rewrite the MCP server environment."""
+    workspace = tmp_path / "workspace"
+    cwd = tmp_path / "cwd"
+    workspace.mkdir()
+    cwd.mkdir()
+    (workspace / "_kanban.md").write_text(
+        "# Board\n\n## TODO\n* [ ] Preview task\n", encoding="utf-8"
+    )
+    (workspace / ".env").write_text(
+        "KANBANGER_PREVIEW_ENV=workspace\n", encoding="utf-8"
+    )
+    (cwd / ".env").write_text(
+        "KANBANGER_PREVIEW_ENV=cwd\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("KANBANGER_WORKSPACE", str(workspace))
+    monkeypatch.setenv("KANBANGER_PREVIEW_ENV", "process")
+    monkeypatch.chdir(cwd)
+    monkeypatch.delitem(sys.modules, "sync_kanban", raising=False)
+    from tests.conftest import _StubMCPServer
+    from kanbanger.tools import register_tools
+
+    server = _StubMCPServer()
+    register_tools(server)
+    payload = json.loads(server.tools["sync_to_github"](dry_run=True))
+
+    assert payload["success"] is True
+    assert os.environ["KANBANGER_PREVIEW_ENV"] == "process"
 
 
 def test_cli_preview_rejects_copied_board_state(tmp_path):
@@ -247,6 +282,71 @@ def test_sync_executes_local_plan_without_remote_reconciliation(tmp_path, monkey
     ]
 
 
+def test_created_item_is_durable_before_initial_status_failure(tmp_path):
+    """A failed status mutation must retry UPDATE, not create a duplicate item."""
+    board_path = tmp_path / "_kanban.md"
+    board_path.write_text(
+        "# Board\n\n## TODO\n* [ ] New\n", encoding="utf-8"
+    )
+
+    class Client:
+        @staticmethod
+        def get_repo_project(owner, repo, project_number):
+            return "R_repo", "PVT_project", "PVTSSF_status", {"Todo": "opt_todo"}
+
+        @staticmethod
+        def create_draft_issue(project_id, title):
+            return "PVTI_new"
+
+        @staticmethod
+        def update_item_status(*args):
+            raise GitHubAPIError("status failed")
+
+    with pytest.raises(GitHubAPIError, match="status failed"):
+        Syncer(
+            LocalBoard(str(board_path)), StateManager(str(board_path)), Client()
+        ).sync("owner/repo", 8)
+
+    reloaded = StateManager(str(board_path)).load()["tasks"]
+    assert reloaded["New"] == {"item_id": "PVTI_new", "status": None}
+    assert build_sync_plan({"New": "Todo"}, reloaded)["operations"] == [{
+        "action": "UPDATE",
+        "title": "New",
+        "from_status": None,
+        "to_status": "Todo",
+        "item_id": "PVTI_new",
+    }]
+
+
+def test_archive_failure_keeps_state_for_retry(tmp_path):
+    """A failed archive must leave its item ID durable for the next sync."""
+    board_path = tmp_path / "_kanban.md"
+    board_path.write_text("# Board\n\n## TODO\n", encoding="utf-8")
+    state = StateManager(str(board_path))
+    state.state["tasks"] = {
+        "Removed": {"item_id": "PVTI_removed", "status": "Done"}
+    }
+    state.save()
+
+    class Client:
+        @staticmethod
+        def get_repo_project(owner, repo, project_number):
+            return "R_repo", "PVT_project", "PVTSSF_status", {}
+
+        @staticmethod
+        def archive_item(project_id, item_id):
+            raise GitHubAPIError("archive failed")
+
+    with pytest.raises(GitHubAPIError, match="archive failed"):
+        Syncer(
+            LocalBoard(str(board_path)), StateManager(str(board_path)), Client()
+        ).sync("owner/repo", 8)
+
+    assert StateManager(str(board_path)).load()["tasks"] == {
+        "Removed": {"item_id": "PVTI_removed", "status": "Done"}
+    }
+
+
 def test_sync_status_resource_reads_task_state_like_the_tool(tmp_path, monkeypatch):
     """Changing the state key must not make the resource disagree with its tool."""
     (tmp_path / ".kanban.json").write_text(json.dumps({"tasks": {
@@ -303,6 +403,40 @@ def test_github_client_translates_request_failures(monkeypatch):
         GitHubClient("token")._query("query { viewer { login } }", {})
 
     assert isinstance(caught.value.__cause__, requests.Timeout)
+
+
+def test_github_client_rejects_a_non_json_response(monkeypatch):
+    """A 200 HTML/error body must cross the client boundary as GitHubAPIError."""
+    class Response:
+        status_code = 200
+        text = "not json"
+
+        @staticmethod
+        def json():
+            raise ValueError("invalid JSON")
+
+    monkeypatch.setattr(requests, "post", lambda *args, **kwargs: Response())
+
+    with pytest.raises(GitHubAPIError, match="invalid JSON") as caught:
+        GitHubClient("token")._query("query { viewer { login } }", {})
+
+    assert isinstance(caught.value.__cause__, ValueError)
+
+
+def test_github_client_rejects_a_non_object_json_response(monkeypatch):
+    """A successful response must still match GraphQL's object envelope."""
+    class Response:
+        status_code = 200
+        text = "[]"
+
+        @staticmethod
+        def json():
+            return []
+
+    monkeypatch.setattr(requests, "post", lambda *args, **kwargs: Response())
+
+    with pytest.raises(GitHubAPIError, match="JSON that is not an object"):
+        GitHubClient("token")._query("query { viewer { login } }", {})
 
 
 def test_mcp_classifies_github_request_failures():

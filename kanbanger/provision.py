@@ -23,7 +23,7 @@ files and is safe to re-run:
                           board via the MCP tools and never hand-edit it.
   * `.mcp.json`         — wires the project to the GLOBAL `kanbanger-mcp`
                           command, with EMPTY GitHub-sync placeholders.
-  * `.gitignore`        — keeps a stray `.venv/` out of version control.
+  * `.gitignore`        — keeps local runtime files out of version control.
 
 NOTE on secrets: the GitHub-sync slots (GITHUB_TOKEN / GITHUB_REPO /
 GITHUB_PROJECT_NUMBER) are written ONLY as `${VAR:-}` shell-style placeholders
