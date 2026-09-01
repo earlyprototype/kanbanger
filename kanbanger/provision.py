@@ -50,9 +50,18 @@ from kanban_io import (
 # Constants (single home — previously duplicated in scripts/setup-venv.py)
 # ---------------------------------------------------------------------------
 
+GITIGNORE_ENTRIES = (
+    ".env",
+    ".env.local",
+    ".kanban.json",
+    ".kanban.lock",
+    ".claude/settings.local.json",
+    ".venv/",
+)
+# Backward-compatible import used by the deprecated setup-venv shim.
 GITIGNORE_ENTRY = ".venv/"
 GITIGNORE_HEADER = (
-    "# Local virtualenv (if any) — kanbanger installs globally; see ADR 0002"
+    "# Kanbanger local runtime files (secrets, sync state, and virtualenv)"
 )
 CLAUDE_MD_START = "<!-- kanbanger:start -->"
 CLAUDE_MD_END = "<!-- kanbanger:end -->"
@@ -189,28 +198,29 @@ def ensure_mcp_json(project_dir: Path, result: ProvisionResult) -> None:
 
 
 def ensure_gitignore_has_venv(project_dir: Path, result: ProvisionResult | None = None) -> None:
-    """Idempotently ensure `.venv/` is gitignored.
+    """Idempotently ensure local runtime files are gitignored.
 
     A stray local venv is harmless if you never make one, but if you do, it
     should stay out of version control (global install is the supported path —
     ADR 0002).
     """
     gitignore = project_dir / GITIGNORE_FILENAME
-    block = f"\n{GITIGNORE_HEADER}\n{GITIGNORE_ENTRY}\n"
+    block = f"\n{GITIGNORE_HEADER}\n" + "\n".join(GITIGNORE_ENTRIES) + "\n"
     if gitignore.exists():
         content = gitignore.read_text(encoding="utf-8")
-        if GITIGNORE_ENTRY in content:
+        missing = [entry for entry in GITIGNORE_ENTRIES if entry not in content.splitlines()]
+        if not missing:
             if result is not None:
-                result.already_present.append(f"{GITIGNORE_FILENAME} (.venv/ already ignored)")
+                result.already_present.append(f"{GITIGNORE_FILENAME} (local runtime files already ignored)")
             return
         sep = "" if content.endswith("\n") else "\n"
-        gitignore.write_text(content + sep + block, encoding="utf-8")
+        gitignore.write_text(content + sep + "\n".join(missing) + "\n", encoding="utf-8")
         if result is not None:
-            result.updated.append(f"{GITIGNORE_FILENAME} (added {GITIGNORE_ENTRY})")
+            result.updated.append(f"{GITIGNORE_FILENAME} (added local runtime files)")
     else:
         gitignore.write_text(block.lstrip("\n"), encoding="utf-8")
         if result is not None:
-            result.created.append(f"{GITIGNORE_FILENAME} (with {GITIGNORE_ENTRY})")
+            result.created.append(f"{GITIGNORE_FILENAME} (with local runtime files)")
 
 
 # ---------------------------------------------------------------------------
@@ -351,26 +361,24 @@ def build_kanban_board(project_name: str) -> str:
     """Return the canonical 5-column board markdown for a new project.
 
     Schema order is the canonical BACKLOG -> TODO -> DOING -> REVIEW -> DONE.
-    Each column carries one placeholder line describing its role so a human (or
-    agent) sees the intended workflow immediately. This mirrors the schema in
-    the server's `instructions` string and the `kanban_workspace` test fixture.
+    Each column carries parser-invisible guidance so it is empty on first sync.
     """
     return f"""# {project_name} Kanban
 
 ## BACKLOG
-*   [ ] Future / unprioritised work
+<!-- Future / unprioritised work -->
 
 ## TODO
-*   [ ] Ready to start, prioritised
+<!-- Ready to start, prioritised -->
 
 ## DOING
-*   [ ] In progress (keep to 1-3 items)
+<!-- In progress (keep to 1-3 items) -->
 
 ## REVIEW
-*   [ ] AI-completed work awaiting human approval
+<!-- AI-completed work awaiting human approval -->
 
 ## DONE
-*   [x] Completed, human-approved work
+<!-- Completed, human-approved work -->
 """
 
 

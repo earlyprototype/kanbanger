@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from kanban_io import extract_board_key, format_board_key_marker
+from sync_kanban import LocalBoard
 from kanbanger import provision
 from kanbanger.provision import (
     CLAUDE_MD_END,
@@ -45,6 +46,14 @@ def test_build_kanban_board_has_canonical_five_columns():
     board = build_kanban_board("Demo")
     assert _columns_in(board) == CANONICAL_COLUMNS
     assert board.startswith("# Demo Kanban")
+
+
+def test_fresh_board_parses_as_five_empty_columns(tmp_path: Path):
+    """Guidance must not become parser-visible work items."""
+    board_path = tmp_path / "_kanban.md"
+    board_path.write_text(build_kanban_board("Demo"), encoding="utf-8")
+
+    assert all(not tasks for tasks in LocalBoard(str(board_path)).parse().values())
 
 
 def test_board_scaffolded_when_absent(tmp_path: Path):
@@ -238,6 +247,19 @@ def test_touchpoint_idempotent_second_run_is_noop(tmp_path: Path):
 
     # Second run created nothing new.
     assert result2.created == []
+
+
+def test_provision_ignores_all_local_runtime_files_idempotently(tmp_path: Path):
+    """Provisioning leaves sync state, secrets, and local tooling untracked."""
+    provision_project(tmp_path)
+    provision_project(tmp_path)
+
+    expected_ignored = {
+        ".env", ".env.local", ".kanban.json", ".kanban.lock",
+        ".claude/settings.local.json", ".venv/",
+    }
+    gitignore_path = tmp_path / ".gitignore"
+    assert expected_ignored <= set(gitignore_path.read_text().splitlines())
 
 
 def test_touchpoint_appended_without_clobbering_existing(tmp_path: Path):

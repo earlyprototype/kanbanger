@@ -787,7 +787,8 @@ def register_tools(server: FastMCP):
         Sync the kanban board to GitHub Projects V2.
         
         Args:
-            dry_run: If True, shows what would be synced without making changes (default: False)
+            dry_run: If True, returns the local sync plan without configuration,
+                network access, or state writes (default: False)
         
         Returns:
             Sync results or error message
@@ -796,7 +797,7 @@ def register_tools(server: FastMCP):
             sync_to_github(dry_run=True)  # Preview changes
             sync_to_github()  # Actually sync
         
-        Requirements:
+        Real-sync requirements:
             - GITHUB_TOKEN environment variable must be set
             - GITHUB_REPO environment variable must be set
             - GITHUB_PROJECT_NUMBER environment variable (optional, will auto-detect)
@@ -813,6 +814,22 @@ def register_tools(server: FastMCP):
                 ERROR_KANBAN_NOT_FOUND,
                 f"Kanban board not found at {kanban_path}",
                 kanban_path=kanban_path,
+            )
+
+        if dry_run:
+            from sync_kanban import LocalBoard, StateManager, build_sync_plan
+
+            board = LocalBoard(kanban_path)
+            state = StateManager(kanban_path)
+            state.load()
+            local_flat = {
+                task["title"]: column
+                for column, tasks in board.parse().items()
+                for task in tasks
+            }
+            return _ok(
+                mode="preview",
+                plan=build_sync_plan(local_flat, state.state["tasks"]),
             )
 
         # Check for required environment variables
@@ -834,9 +851,6 @@ def register_tools(server: FastMCP):
         # Audit R4: use sys.executable instead of bare "python" so the
         # subprocess always runs under the same interpreter as the MCP server.
         cmd = [sys.executable, "-m", "sync_kanban", kanban_path]
-        if dry_run:
-            cmd.append("--dry-run")
-
         def _drain(stream, sink):
             try:
                 for chunk in iter(stream.readline, ''):
@@ -941,7 +955,11 @@ def register_tools(server: FastMCP):
             return json.dumps({
                 "synced_tasks": len(state.get("tasks", {})),
                 "state_file": state_path,
-                "github_items": list(state.get("tasks", {}).keys())
+                "github_items": list(state.get("tasks", {}).keys()),
+                "github_item_ids": [
+                    item.get("item_id")
+                    for item in state.get("tasks", {}).values()
+                ],
             }, indent=2)
         except Exception as e:
             return json.dumps({

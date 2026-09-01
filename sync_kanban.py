@@ -43,6 +43,7 @@ except ImportError:
 
 # GitHub GraphQL endpoint
 GITHUB_API = "https://api.github.com/graphql"
+GITHUB_TIMEOUT_SEC = 30
 
 # R8: state file schema version. Persisted in .kanban.json so future
 # kanbanger versions can detect and migrate older state shapes.
@@ -72,6 +73,56 @@ class ProjectNotFoundError(KanbangerError):
 class ConfigurationError(KanbangerError):
     """Required configuration is missing or invalid: env var, file
     path, or runtime dependency."""
+
+
+def build_sync_plan(
+    local_flat: dict[str, str], state_tasks: dict[str, dict]
+) -> dict:
+    """Return the local-source-of-truth changes required by a sync."""
+    operations = []
+    summary = {"create": 0, "update": 0, "archive": 0}
+
+    for title, to_status in local_flat.items():
+        stored = state_tasks.get(title)
+        if stored is None:
+            operations.append({
+                "action": "CREATE",
+                "title": title,
+                "from_status": None,
+                "to_status": to_status,
+                "item_id": None,
+            })
+            summary["create"] += 1
+        elif stored.get("status") != to_status:
+            operations.append({
+                "action": "UPDATE",
+                "title": title,
+                "from_status": stored.get("status"),
+                "to_status": to_status,
+                "item_id": stored.get("item_id"),
+            })
+            summary["update"] += 1
+
+    for title, stored in state_tasks.items():
+        if title not in local_flat:
+            operations.append({
+                "action": "ARCHIVE",
+                "title": title,
+                "from_status": stored.get("status"),
+                "to_status": None,
+                "item_id": stored.get("item_id"),
+            })
+            summary["archive"] += 1
+
+    return {"operations": operations, "summary": summary}
+
+
+def _flatten_local_tasks(tasks: Dict[str, List[Dict]]) -> dict[str, str]:
+    return {
+        task["title"]: column
+        for column, column_tasks in tasks.items()
+        for task in column_tasks
+    }
 
 
 class LocalBoard:
@@ -345,7 +396,8 @@ class GitHubClient:
         response = self.requests.post(
             GITHUB_API,
             headers=self.headers,
-            json={"query": query, "variables": variables}
+            json={"query": query, "variables": variables},
+            timeout=GITHUB_TIMEOUT_SEC,
         )
         
         if response.status_code != 200:
@@ -612,27 +664,18 @@ class Syncer:
         # Update state with project info
         self.state.set_project_info(repo_node_id, project_id)
         
-        print(f"Fetching remote project items...")
-        remote_items = self.client.get_project_items(project_id)
-        remote_by_title = {item["title"]: item for item in remote_items}
-        
         print(f"\nSynchronizing...")
-        
-        # Flatten local tasks to (title, status) pairs
-        local_flat = {}
-        for column, tasks in local_tasks.items():
-            for task in tasks:
-                local_flat[task["title"]] = column
-        
-        # Track which remote items we've seen
-        seen_remote = set()
-        
-        # Process local tasks
-        for title, desired_status in local_flat.items():
-            item_id = self.state.get_item_id(title)
-            stored_status = self.state.get_status(title)
-            
-            if not item_id:
+        plan = build_sync_plan(
+            _flatten_local_tasks(local_tasks), self.state.state["tasks"]
+        )
+
+        for operation in plan["operations"]:
+            action = operation["action"]
+            title = operation["title"]
+            desired_status = operation["to_status"]
+            item_id = operation["item_id"]
+
+            if action == "CREATE":
                 # New task - create it
                 print(f"  [CREATE] {title} => {desired_status}")
                 item_id = self.client.create_draft_issue(project_id, title)
@@ -669,10 +712,13 @@ class Syncer:
                         f"run.",
                         file=sys.stderr,
                     )
-            elif stored_status != desired_status:
+            elif action == "UPDATE":
                 # Status changed (or first status set after a previous
                 # failed attempt — see D12 pattern above)
-                print(f"  [UPDATE] {title}: {stored_status} => {desired_status}")
+                print(
+                    f"  [UPDATE] {title}: {operation['from_status']} "
+                    f"=> {desired_status}"
+                )
                 if desired_status in self.status_options:
                     self.client.update_item_status(
                         project_id, item_id, status_field_id,
@@ -692,16 +738,7 @@ class Syncer:
                         f"not updated. Sync will retry next run.",
                         file=sys.stderr,
                     )
-            else:
-                # No change
-                print(f"  [OK] {title}")
-
-            seen_remote.add(title)
-
-        # Archive tasks that were removed from markdown
-        for title in list(self.state.state["tasks"].keys()):
-            if title not in local_flat:
-                item_id = self.state.get_item_id(title)
+            else:  # ARCHIVE
                 print(f"  [ARCHIVE] {title}")
                 self.client.archive_item(project_id, item_id)
                 self.state.remove_task(title)
@@ -717,7 +754,7 @@ class Syncer:
         print(f"Sync complete!")
 
 
-def main():
+def _main():
     # Fix console encoding for Windows; 'replace' (R11) so a stray byte cannot raise into the parent's pipe drain.
     if sys.platform == 'win32':
         import codecs
@@ -729,19 +766,13 @@ def main():
     parser.add_argument('--repo', help='GitHub repo (owner/name)', default=os.environ.get('GITHUB_REPO') or None)
     parser.add_argument('--project', type=int, help='GitHub Project number (optional if only one project linked)',
                         default=os.environ.get('GITHUB_PROJECT_NUMBER') or None)
-    parser.add_argument('--dry-run', action='store_true', help='Parse only, no sync')
+    parser.add_argument('--dry-run', action='store_true', help='Print local sync plan without GitHub access')
     
     args = parser.parse_args()
     
     # Convert project number from env var
     if args.project and isinstance(args.project, str):
         args.project = int(args.project) if args.project.isdigit() else None
-
-    # Fail-fast on missing repo BEFORE any work, including --dry-run.
-    if not args.repo:
-        raise ConfigurationError(
-            "--repo or GITHUB_REPO environment variable required"
-        )
 
     if not os.path.exists(args.kanban_file):
         raise ConfigurationError(f"File not found: {args.kanban_file}")
@@ -750,15 +781,17 @@ def main():
     board = LocalBoard(args.kanban_file)
 
     if args.dry_run:
-        print(f"Parsing {args.kanban_file}...")
-        tasks = board.parse()
-        print("\nParsed tasks:")
-        for column, items in tasks.items():
-            print(f"\n{column}:")
-            for item in items:
-                status = "[x]" if item.get('done') else "[ ]"
-                print(f"  {status} {item['title']}")
+        state = StateManager(args.kanban_file)
+        state.load()
+        print(json.dumps(build_sync_plan(
+            _flatten_local_tasks(board.parse()), state.state["tasks"]
+        )))
         return
+
+    if not args.repo:
+        raise ConfigurationError(
+            "--repo or GITHUB_REPO environment variable required"
+        )
 
     token = os.environ.get('GITHUB_TOKEN')
     if not token:
@@ -771,6 +804,16 @@ def main():
     syncer.sync(args.repo, args.project)
 
 
+def main():
+    """Run the console entry point without leaking expected errors as traces."""
+    try:
+        _main()
+    except KanbangerError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 if __name__ == "__main__":
     # E1: catch typed library errors and present them with the same
     # 'Error: <message>' shape callers used to print directly. Same
@@ -778,11 +821,7 @@ if __name__ == "__main__":
     # land on stderr (was a mix of stdout + stderr previously).
     # Other exceptions propagate with their traceback — those are bugs.
     try:
-        try:
-            main()
-        except KanbangerError as exc:
-            print(f"Error: {exc}", file=sys.stderr)
-            sys.exit(1)
+        sys.exit(main())
     finally:
         # R11: flush before exit so the parent sees a clean EOF on its pipes.
         try:
