@@ -446,6 +446,9 @@ def test_mcp_classifies_github_request_failures():
     assert _classify_sync_stderr(
         "Error: GitHub API request failed: timed out\n"
     ) == ERROR_GITHUB_API
+    assert _classify_sync_stderr(
+        "Error: GitHub API returned invalid JSON: bad body\n"
+    ) == ERROR_GITHUB_API
 
 
 def test_malformed_repo_is_a_formatted_configuration_error(tmp_path):

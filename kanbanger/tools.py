@@ -126,7 +126,7 @@ def _classify_sync_stderr(stderr: str) -> str:
         if body.startswith("File not found"):
             return ERROR_KANBAN_NOT_FOUND
         if (
-            "GitHub API returned status" in body
+            body.startswith("GitHub API returned")
             or body.startswith("GraphQL errors")
             or body.startswith("GitHub API request failed")
         ):
