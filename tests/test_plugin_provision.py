@@ -104,15 +104,18 @@ def test_plugin_provision_never_edits_existing_mcp_config(tmp_path: Path, existi
     ))
 
 
-def test_plugin_refreshes_only_marker_scoped_guidance_and_is_idempotent(tmp_path: Path):
-    prefix = "# Project instructions\n\nKeep this existing guidance.\n\n"
-    suffix = "\n\n## Local conventions\nKeep these too.\n"
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_plugin_refreshes_only_marker_scoped_guidance_and_is_idempotent(
+    tmp_path: Path, newline: str,
+):
+    prefix = "# Project instructions\n\nKeep this existing guidance.\n\n".replace("\n", newline)
+    suffix = "\n\n## Local conventions\nKeep these too.\n".replace("\n", newline)
     stale = (
         prefix + CLAUDE_MD_START + "\nInstall globally with pipx install old.\n"
         + CLAUDE_MD_END + suffix
     )
     for name in ("CLAUDE.md", "AGENTS.md"):
-        (tmp_path / name).write_text(stale, encoding="utf-8")
+        (tmp_path / name).write_bytes(stale.encode("utf-8"))
 
     provision_project(tmp_path, install_mode="plugin")
     first = _snapshot(tmp_path)
@@ -125,7 +128,7 @@ def test_plugin_refreshes_only_marker_scoped_guidance_and_is_idempotent(tmp_path
     assert result.updated == []
     assert extract_board_key((tmp_path / "_kanban.md").read_text(encoding="utf-8")) == first_key
     for name in ("CLAUDE.md", "AGENTS.md"):
-        text = (tmp_path / name).read_text(encoding="utf-8")
+        text = (tmp_path / name).read_bytes().decode("utf-8")
         assert text.startswith(prefix)
         assert text.endswith(suffix)
         assert text.count(CLAUDE_MD_START) == 1

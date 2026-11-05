@@ -53,6 +53,13 @@ global `kanbanger-mcp` command, and adds the agent touchpoint (rationale:
 [docs/adr/0002](docs/adr/0002-single-install-and-collision-proof-binding.md)).
 The in-MCP `setup_project` tool does the same from inside a session.
 
+For a plugin-owned server, the launcher sets `KANBANGER_INSTALL_MODE=plugin`.
+Then `setup_project()` provisions the board and guidance while skipping all
+`.mcp.json` wiring. Its optional `install_mode` argument overrides the marker.
+Only `standalone` and `plugin` are valid modes. Shared provisioning helpers
+default explicitly to standalone, so `kanbanger init` ignores ambient plugin
+markers. Plugin recovery guidance should re-enable the existing plugin.
+
 ### GitHub sync (optional)
 
 `kanban-sync` and MCP `sync_to_github` need `GITHUB_TOKEN`, `GITHUB_REPO`, and `GITHUB_PROJECT_NUMBER` in the environment or `.env`. CI and most unit tests do not need them. `kanban-doctor` reports missing credentials as FAIL for sync-related checks but MCP/board checks can still pass.
@@ -65,3 +72,4 @@ The in-MCP `setup_project` tool does the same from inside a session.
 | `kanbanger` subprocess | Only `tests/test_stdio_e2e.py` | Test spawns it automatically |
 | GitHub API | No | Optional for sync demos |
 | MCP IDE host | No | Optional for manual MCP E2E |
+

@@ -26,7 +26,7 @@ from kanban_io import (
     parse_task_title_with_description as _parse_task_title_with_description,
 )
 from .binding import resolve_workspace
-from .provision import provision_project
+from .provision import provision_project, validate_install_mode
 
 # S6: title-injection guard. Lines beginning with `* [` are kanban
 # task entries and `## ` are column headers; allowing those patterns
@@ -1336,7 +1336,7 @@ def register_tools(server: FastMCP):
         )
 
     @server.tool()
-    def setup_project() -> str:
+    def setup_project(install_mode: Optional[str] = None) -> str:
         """
         Provision THIS workspace for kanbanger (idempotent first-contact setup).
 
@@ -1360,15 +1360,22 @@ def register_tools(server: FastMCP):
             MCP tools; never hand-edit `_kanban.md`; REVIEW gates DONE). Added
             if absent, refreshed in place if the marker block is already there.
             `AGENTS.md` gets the same stanza only if it already exists.
-          - `.mcp.json`: wires the project to the global `kanbanger-mcp`
-            command, with EMPTY GitHub-sync placeholders. Written only if
-            absent; an existing `.mcp.json` is left untouched.
+          - `.mcp.json` (standalone mode only): wires the project to the global
+            `kanbanger-mcp` command, with EMPTY GitHub-sync placeholders. Written
+            only if absent; an existing `.mcp.json` is left untouched. Plugin
+            mode skips MCP wiring entirely and uses plugin recovery guidance.
           - `.gitignore`: ensures local runtime files stay out of version control.
 
         GitHub sync: the GITHUB_TOKEN / GITHUB_REPO / GITHUB_PROJECT_NUMBER
-        slots in `.mcp.json` are empty `${VAR:-}` placeholders. NO secret is
+        slots in standalone `.mcp.json` are empty `${VAR:-}` placeholders. NO secret is
         ever written; fill them via your environment or a local, gitignored
         `.env`, then sync_to_github / get_sync_status will pick them up.
+
+        Args:
+            install_mode: Optional 'standalone' or 'plugin' override. If omitted,
+                use KANBANGER_INSTALL_MODE, then 'standalone' when unset. Plugin
+                launchers should set KANBANGER_INSTALL_MODE=plugin. Invalid or
+                empty modes return a configuration error before any file writes.
 
         Returns:
             A human-readable summary of what was created vs already present.
@@ -1380,8 +1387,16 @@ def register_tools(server: FastMCP):
         (kanbanger.binding.resolve_binding): env pin > walk-up > cwd.
         """
         workspace = get_workspace()
+        mode = (
+            install_mode if install_mode is not None
+            else os.environ.get("KANBANGER_INSTALL_MODE", "standalone")
+        )
         try:
-            result = provision_project(workspace)
+            validate_install_mode(mode)
+        except ValueError as e:
+            return _error(ERROR_CONFIGURATION, str(e), workspace=workspace)
+        try:
+            result = provision_project(workspace, install_mode=mode)
         except FileNotFoundError as e:
             return _error(
                 ERROR_CONFIGURATION,
@@ -1449,3 +1464,4 @@ def register_tools(server: FastMCP):
                 f"doctor run failed: {e}",
                 workspace=workspace,
             )
+

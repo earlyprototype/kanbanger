@@ -50,10 +50,13 @@ If `_kanban.md` does NOT exist, Kanbanger is not set up in this project yet.
 Do NOT silently create it. Tell the user, and ask if they want to set
 Kanbanger up here. If they agree, call the `setup_project` tool: it
 provisions the project idempotently - scaffolds the canonical 5-column
-board (BACKLOG -> TODO -> DOING -> REVIEW -> DONE), writes a `.mcp.json`
-targeting the global `kanbanger-mcp` command, and adds the agent
-touchpoint. (`kanbanger init` run from the project root is the CLI
-equivalent.) Never hand-create or hand-edit the board.
+board (BACKLOG -> TODO -> DOING -> REVIEW -> DONE) and adds the agent
+touchpoint. Plugin launchers set KANBANGER_INSTALL_MODE=plugin so setup
+reuses the existing plugin's MCP wiring and leaves `.mcp.json` untouched.
+Without that marker, setup defaults to standalone mode and writes an absent
+`.mcp.json` targeting global `kanbanger-mcp`, like `kanbanger init`.
+The optional setup_project install_mode argument overrides the marker.
+Never hand-create or hand-edit the board.
 
 If `_kanban.md` already exists, proceed normally.
 
@@ -161,3 +164,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

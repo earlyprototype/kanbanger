@@ -2,6 +2,15 @@
 
 ## TL;DR
 
+Already using a Kanbanger plugin? Call `setup_project()` through that plugin.
+Its server launcher should set `KANBANGER_INSTALL_MODE=plugin`; alternatively,
+call `setup_project(install_mode="plugin")` explicitly. This provisions the
+board, stable board key, `.gitignore` and agent guidance without creating,
+reading or modifying `.mcp.json`. Recovery uses the existing plugin: re-enable
+it and restart the host session if tools are unavailable.
+
+The steps below are for standalone installations.
+
 Once per machine:
 
 ```
@@ -65,12 +74,21 @@ PATH; add it and restart your shell.
 
 ## Provision (once per project)
 
-Two equivalent paths — both run the exact same provisioning code:
+Two standalone paths share the same provisioning code:
 
 - **CLI:** from the project root, run `kanbanger init`
 - **In-session:** if the kanbanger MCP server is already available, ask the
   assistant to run the `setup_project` tool. (On first contact with an
   unprovisioned project, the assistant offers this itself.)
+
+`setup_project` chooses an explicit `install_mode` argument first, then
+`KANBANGER_INSTALL_MODE`, then `standalone` when the marker is unset. Valid
+modes are `standalone` and `plugin`; empty or invalid values return an error
+before writes. Core provisioning and `kanbanger init` always default to
+standalone, even when an ambient plugin marker is present. In plugin mode,
+MCP wiring is intentionally skipped and existing `.mcp.json` bytes are preserved,
+including unrelated servers. Configure optional GitHub sync through the plugin
+server's environment or a local, gitignored `.env`.
 
 What provisioning writes — idempotent, safe to re-run:
 
@@ -195,3 +213,4 @@ shell/IDE.
 **".mcp.json is loaded but server reports 'not connected'"** — Run
 `kanbanger-mcp --help` in a terminal to surface the real error (usually a
 broken dependency).
+

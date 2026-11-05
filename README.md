@@ -51,6 +51,15 @@ Rejection isn't a dead end either: `reject_review` opens a new `Rework: <title>`
 
 ## Quick start
 
+**Using an existing Kanbanger plugin?** Ask your assistant to call
+`setup_project()`. Plugin launchers should set `KANBANGER_INSTALL_MODE=plugin`
+in the server environment; `setup_project(install_mode="plugin")` is an explicit
+override. This creates the board and agent guidance without creating or changing
+any `.mcp.json`. If tools disappear, re-enable the existing plugin and restart
+the host session. No global Kanbanger executable is required for plugin setup.
+
+The following steps describe a standalone installation.
+
 ```mermaid
 graph LR
     A[Install once<br/>pipx] --> B[kanbanger init<br/>per project]
@@ -196,7 +205,7 @@ Your AI assistant gets these **tools**:
 
 | Tool | Purpose |
 |------|---------|
-| `setup_project()` | Provision this workspace (idempotent) |
+| `setup_project(install_mode?)` | Provision this workspace; plugin mode reuses existing server wiring |
 | `add_task(title, column, description?)` | Add a task |
 | `move_task(title, from_column, to_column)` | Move a task between columns |
 | `delete_task(title, column)` | Remove a task |
@@ -227,7 +236,7 @@ And these **prompts**:
 
 ### `.mcp.json` (written by provisioning)
 
-`kanbanger init` (or the `setup_project` MCP tool) writes a `.mcp.json` in your project root that targets the single global install:
+`kanbanger init` (or `setup_project` in standalone mode) writes a `.mcp.json` in your project root that targets the single global install. Plugin mode leaves this file untouched:
 
 ```json
 {
@@ -364,3 +373,4 @@ MIT — see [LICENSE](LICENSE)
 ---
 
 **Made with ❤️ for developers who want AI-assisted task management without leaving their editor.**
+
