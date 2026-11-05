@@ -202,6 +202,10 @@ Three values: `GITHUB_TOKEN`, `GITHUB_REPO` (`owner/repo`), and (recommended) `G
 
 **CLI path** (`kanban-sync`): put them in a `.env` file in the project root. The `.env` deliberately **overrides** the shell environment, so a stale exported `GITHUB_REPO` from another project can't silently route your sync to the wrong board. On Windows, save `.env` as UTF-8 **without** BOM — see [INSTALL.md](INSTALL.md) for the details.
 
+MCP preflight requires `GITHUB_TOKEN` and `GITHUB_REPO` in the server process
+environment; a workspace `.env` alone is insufficient. After that check, the
+sync CLI subprocess still loads `.env` and can override inherited values.
+
 ### First sync
 
 1. Restart the Claude session so the MCP server picks up the new env values.

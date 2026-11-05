@@ -59,9 +59,8 @@ ERROR_INVALID_STATE = "invalid_state"
 # reject_review demands a non-empty reason — empty rejections would
 # create a Rework task with no actionable context.
 ERROR_MISSING_REASON = "missing_reason"
-# Bundle 1b: move_task -> DONE is reserved for the REVIEW-gate happy path.
-# Direct calls from any non-REVIEW column return this code; the canonical
-# path is propose_done(title) followed by approve_done(title).
+# Direct creation in DONE and moves that bypass REVIEW return this code.
+# The canonical path is propose_done(title), then approve_done(title).
 ERROR_GATE_VIOLATION = "gate_violation"
 # ADR 0002 (issue #15 step 4): the sync-state sidecar records the board's
 # minted key; a mismatch means .kanban.json belongs to a DIFFERENT board
@@ -289,10 +288,11 @@ def register_tools(server: FastMCP):
 
         Args:
             title: Task title (required, should be concise and action-oriented)
-            column: Target column - any column present in the board's
+            column: Target column - any column except canonical DONE in the board's
                 ``## section`` headers (default: TODO). The set is whatever
                 the board declares; common values are BACKLOG, TODO, DOING,
-                REVIEW, DONE.
+                REVIEW. DONE requires the review/approval path: create work in
+                DOING, then propose_done(title) and approve_done(title).
             description: Optional task description for additional context
 
         Returns:
@@ -331,6 +331,19 @@ def register_tools(server: FastMCP):
         ok, err = validate_task_title(title)
         if not ok:
             return _error(ERROR_INVALID_TITLE, err)
+
+        # Creation must honor the same REVIEW boundary as move_task. Reject
+        # before acquiring the lock, which itself creates a sidecar file.
+        if column == "DONE":
+            return _error(
+                ERROR_GATE_VIOLATION,
+                "Direct add_task to DONE bypasses the REVIEW gate. Create work "
+                "in DOING, then use propose_done(title) to move it to REVIEW "
+                "and approve_done(title) to land in DONE.",
+                title=title,
+                column=column,
+                canonical_path=["propose_done", "approve_done"],
+            )
 
         # R2: serialize mutations cross-process so concurrent writers can't lost-update.
         with kanban_lock(get_workspace()):
@@ -1367,9 +1380,11 @@ def register_tools(server: FastMCP):
           - `.gitignore`: ensures local runtime files stay out of version control.
 
         GitHub sync: the GITHUB_TOKEN / GITHUB_REPO / GITHUB_PROJECT_NUMBER
-        slots in standalone `.mcp.json` are empty `${VAR:-}` placeholders. NO secret is
-        ever written; fill them via your environment or a local, gitignored
-        `.env`, then sync_to_github / get_sync_status will pick them up.
+        slots in standalone `.mcp.json` are empty `${VAR:-}` placeholders. NO
+        secret is ever written. For MCP sync, set TOKEN/REPO in the server's
+        process environment through the host's launch configuration and restart
+        the server. A workspace `.env` alone does not satisfy MCP preflight;
+        the sync CLI subprocess still loads `.env` and may override env values.
 
         Args:
             install_mode: Optional 'standalone' or 'plugin' override. If omitted,

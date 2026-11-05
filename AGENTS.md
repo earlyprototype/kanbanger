@@ -62,7 +62,14 @@ markers. Plugin recovery guidance should re-enable the existing plugin.
 
 ### GitHub sync (optional)
 
-`kanban-sync` and MCP `sync_to_github` need `GITHUB_TOKEN`, `GITHUB_REPO`, and `GITHUB_PROJECT_NUMBER` in the environment or `.env`. CI and most unit tests do not need them. `kanban-doctor` reports missing credentials as FAIL for sync-related checks but MCP/board checks can still pass.
+MCP `sync_to_github` requires `GITHUB_TOKEN` and `GITHUB_REPO` in the server
+process environment before its credential preflight; set them through the host's
+launch configuration and restart the server. `GITHUB_PROJECT_NUMBER` is optional.
+A workspace `.env` alone does not satisfy preflight. The sync CLI (also used by
+the MCP subprocess after preflight) still loads `.env` with `override=True`, so
+it can override inherited values. CI and most unit tests need no credentials.
+`kanban-doctor` reports missing credentials as FAIL for sync-related checks but
+MCP/board checks can still pass.
 
 ### Services summary
 

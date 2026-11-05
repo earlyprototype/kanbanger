@@ -30,7 +30,8 @@ and is safe to re-run:
 NOTE on secrets: the GitHub-sync slots (GITHUB_TOKEN / GITHUB_REPO /
 GITHUB_PROJECT_NUMBER) are written ONLY as `${VAR:-}` shell-style placeholders
 in `.mcp.json`. No real secret is ever written by this module; the user fills
-them into their environment (or a local, gitignored `.env` / shell profile).
+them into the server's launch environment for MCP sync. The CLI supports a
+local, gitignored `.env`; it alone does not satisfy MCP credential preflight.
 """
 
 from __future__ import annotations
@@ -127,15 +128,20 @@ class ProvisionResult:
         if self.install_mode == "plugin":
             lines.append(
                 "GitHub sync is optional. Configure GITHUB_TOKEN / GITHUB_REPO / "
-                "GITHUB_PROJECT_NUMBER via the plugin server's environment or "
-                "a local, gitignored .env — no secrets are stored in the repo."
+                "GITHUB_PROJECT_NUMBER in the plugin server's process environment "
+                "via the host's launch configuration, then restart the server. "
+                "A workspace .env alone does not satisfy MCP preflight; the sync "
+                "CLI subprocess still loads .env and may override env values — "
+                "no secrets are stored in the repo."
             )
         else:
             lines.append(
                 "GitHub sync is OFF until you fill the placeholders in "
                 f"{MCP_JSON_FILENAME} (GITHUB_TOKEN / GITHUB_REPO / "
-                "GITHUB_PROJECT_NUMBER) via your environment or a local, "
-                "gitignored .env — no secrets are stored in the repo."
+                "GITHUB_PROJECT_NUMBER) via the host's server-launch environment, "
+                "then restart the server. A workspace .env alone does not satisfy "
+                "MCP credential preflight; the sync CLI subprocess still loads "
+                ".env and may override env values — no secrets are stored in the repo."
             )
         return "\n".join(lines)
 
@@ -176,7 +182,7 @@ def build_mcp_config(project_dir: Path) -> dict:
                     + project_path_fwd
                     + "}",
                     # Sync-config slots — empty placeholders only. Fill via the
-                    # environment / a local .env; do not paste secrets here.
+                    # host server-launch environment; do not paste secrets here.
                     "GITHUB_TOKEN": "${GITHUB_TOKEN:-}",
                     "GITHUB_REPO": "${GITHUB_REPO:-}",
                     "GITHUB_PROJECT_NUMBER": "${GITHUB_PROJECT_NUMBER:-}",

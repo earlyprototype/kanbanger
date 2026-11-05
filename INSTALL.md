@@ -109,8 +109,12 @@ modes are `standalone` and `plugin`; empty or invalid values return an error
 before writes. Core provisioning and `kanbanger init` always default to
 standalone, even when an ambient plugin marker is present. In plugin mode,
 MCP wiring is intentionally skipped and existing `.mcp.json` bytes are preserved,
-including unrelated servers. Configure optional GitHub sync through the plugin
-server's environment or a local, gitignored `.env`.
+including unrelated servers. For optional MCP GitHub sync, configure
+`GITHUB_TOKEN` and `GITHUB_REPO` in the server process environment through the
+host's launch settings, then restart the server. A workspace `.env` alone does
+not satisfy MCP preflight. The sync CLI subprocess still loads `.env` with
+`override=True`, so it may override inherited values; direct CLI `.env` setup
+remains supported.
 
 What provisioning writes — idempotent, safe to re-run:
 

@@ -70,6 +70,12 @@ If `_kanban.md` already exists, proceed normally.
 - Prompts: kanban awareness, task planning, daily standup, review-gate
   etiquette, sync check.
 
+## Optional GitHub sync
+Real sync requires GITHUB_TOKEN and GITHUB_REPO in the server's process
+environment. Configure them through the host's server-launch settings and
+restart the server. A workspace .env alone does not satisfy MCP preflight;
+the sync CLI subprocess still loads .env and can override inherited values.
+
 ## REVIEW gates DONE
 AI-completed work moves to REVIEW, never straight to DONE. A human approves
 REVIEW -> DONE.
