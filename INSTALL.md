@@ -2,6 +2,37 @@
 
 ## TL;DR
 
+**Claude Code marketplace option:** Install [uv/uvx](https://docs.astral.sh/uv/getting-started/installation/)
+and Git on the host's `PATH` (Python 3.10+ must be available or downloadable by uv).
+Install with one command in an interactive Claude Code **2.1.275+** session:
+
+```text
+/plugin install kanbanger --marketplace earlyprototype/early-prototype
+```
+
+Accept the normal marketplace confirmation and complete installation in the
+plugin panel. For older versions, use the two-step fallback:
+
+```text
+/plugin marketplace add earlyprototype/early-prototype
+/plugin install kanbanger@early-prototype
+```
+
+Complete installation in the panel, call `setup_project()` for your project, then
+restart the session to load guidance. No global Kanbanger executable is needed;
+first launch downloads the pinned server and dependencies. Follow the
+[marketplace plugin guide](https://github.com/earlyprototype/early-prototype/blob/main/plugins/kanbanger/README.md)
+for first use, migration and separate manual Cursor/Codex MCP routes.
+
+Already using a Kanbanger plugin? Call `setup_project()` through that plugin.
+Its server launcher should set `KANBANGER_INSTALL_MODE=plugin`; alternatively,
+call `setup_project(install_mode="plugin")` explicitly. This provisions the
+board, stable board key, `.gitignore` and agent guidance without creating,
+reading or modifying `.mcp.json`. Recovery uses the existing plugin: re-enable
+it and restart the host session if tools are unavailable.
+
+The steps below are for standalone installations.
+
 Once per machine:
 
 ```
@@ -65,12 +96,25 @@ PATH; add it and restart your shell.
 
 ## Provision (once per project)
 
-Two equivalent paths — both run the exact same provisioning code:
+Two standalone paths share the same provisioning code:
 
 - **CLI:** from the project root, run `kanbanger init`
 - **In-session:** if the kanbanger MCP server is already available, ask the
   assistant to run the `setup_project` tool. (On first contact with an
   unprovisioned project, the assistant offers this itself.)
+
+`setup_project` chooses an explicit `install_mode` argument first, then
+`KANBANGER_INSTALL_MODE`, then `standalone` when the marker is unset. Valid
+modes are `standalone` and `plugin`; empty or invalid values return an error
+before writes. Core provisioning and `kanbanger init` always default to
+standalone, even when an ambient plugin marker is present. In plugin mode,
+MCP wiring is intentionally skipped and existing `.mcp.json` bytes are preserved,
+including unrelated servers. For optional MCP GitHub sync, configure
+`GITHUB_TOKEN` and `GITHUB_REPO` in the server process environment through the
+host's launch settings, then restart the server. A workspace `.env` alone does
+not satisfy MCP preflight. The sync CLI subprocess still loads `.env` with
+`override=True`, so it may override inherited values; direct CLI `.env` setup
+remains supported.
 
 What provisioning writes — idempotent, safe to re-run:
 
@@ -195,3 +239,4 @@ shell/IDE.
 **".mcp.json is loaded but server reports 'not connected'"** — Run
 `kanbanger-mcp --help` in a terminal to surface the real error (usually a
 broken dependency).
+

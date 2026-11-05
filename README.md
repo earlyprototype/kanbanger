@@ -51,6 +51,37 @@ Rejection isn't a dead end either: `reject_review` opens a new `Rework: <title>`
 
 ## Quick start
 
+**Claude Code marketplace option:** Install [uv/uvx](https://docs.astral.sh/uv/getting-started/installation/)
+and Git on the host's `PATH` (Python 3.10+ must be available or downloadable by uv),
+then install with one command in an interactive Claude Code **2.1.275+** session:
+
+```text
+/plugin install kanbanger --marketplace earlyprototype/early-prototype
+```
+
+Accept the normal marketplace confirmation and complete installation in the
+plugin panel. For older versions, use the two-step fallback:
+
+```text
+/plugin marketplace add earlyprototype/early-prototype
+/plugin install kanbanger@early-prototype
+```
+
+Complete installation in the panel, then ask for `setup_project()` in your project
+and restart the session to load its guidance. No global Kanbanger installation is
+required. See the [plugin guide](https://github.com/earlyprototype/early-prototype/blob/main/plugins/kanbanger/README.md)
+for first use, migration and separate manual Cursor/Codex MCP routes. First launch
+downloads the pinned server and dependencies.
+
+**Using an existing Kanbanger plugin?** Ask your assistant to call
+`setup_project()`. Plugin launchers should set `KANBANGER_INSTALL_MODE=plugin`
+in the server environment; `setup_project(install_mode="plugin")` is an explicit
+override. This creates the board and agent guidance without creating or changing
+any `.mcp.json`. If tools disappear, re-enable the existing plugin and restart
+the host session. No global Kanbanger executable is required for plugin setup.
+
+The following steps describe a standalone installation.
+
 ```mermaid
 graph LR
     A[Install once<br/>pipx] --> B[kanbanger init<br/>per project]
@@ -171,6 +202,10 @@ Three values: `GITHUB_TOKEN`, `GITHUB_REPO` (`owner/repo`), and (recommended) `G
 
 **CLI path** (`kanban-sync`): put them in a `.env` file in the project root. The `.env` deliberately **overrides** the shell environment, so a stale exported `GITHUB_REPO` from another project can't silently route your sync to the wrong board. On Windows, save `.env` as UTF-8 **without** BOM — see [INSTALL.md](INSTALL.md) for the details.
 
+MCP preflight requires `GITHUB_TOKEN` and `GITHUB_REPO` in the server process
+environment; a workspace `.env` alone is insufficient. After that check, the
+sync CLI subprocess still loads `.env` and can override inherited values.
+
 ### First sync
 
 1. Restart the Claude session so the MCP server picks up the new env values.
@@ -196,7 +231,7 @@ Your AI assistant gets these **tools**:
 
 | Tool | Purpose |
 |------|---------|
-| `setup_project()` | Provision this workspace (idempotent) |
+| `setup_project(install_mode?)` | Provision this workspace; plugin mode reuses existing server wiring |
 | `add_task(title, column, description?)` | Add a task |
 | `move_task(title, from_column, to_column)` | Move a task between columns |
 | `delete_task(title, column)` | Remove a task |
@@ -227,7 +262,7 @@ And these **prompts**:
 
 ### `.mcp.json` (written by provisioning)
 
-`kanbanger init` (or the `setup_project` MCP tool) writes a `.mcp.json` in your project root that targets the single global install:
+`kanbanger init` (or `setup_project` in standalone mode) writes a `.mcp.json` in your project root that targets the single global install. Plugin mode leaves this file untouched:
 
 ```json
 {
@@ -364,3 +399,4 @@ MIT — see [LICENSE](LICENSE)
 ---
 
 **Made with ❤️ for developers who want AI-assisted task management without leaving their editor.**
+

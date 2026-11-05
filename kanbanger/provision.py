@@ -6,9 +6,10 @@ in-MCP `setup_project` tool (kanbanger.tools) AND the deprecated external
 `scripts/setup-venv.py` import from here, so the two paths can never drift
 (ADR 0002, issue #15 step 3).
 
-Provisioning is the LIGHTWEIGHT, per-project half (distinct from INSTALL, which
-is a single global `pipx install` — see ADR 0002). It writes only project-local
-files and is safe to re-run:
+Provisioning is the LIGHTWEIGHT, per-project half (distinct from INSTALL).
+Standalone installs use a global command (ADR 0002); plugin installs reuse
+the host's existing server registration. It writes only project-local files
+and is safe to re-run:
 
   * `_kanban.md`        — the board, canonical 5-column schema, with a stable
                           board key minted into it (ADR 0002 collision-proof
@@ -23,12 +24,14 @@ files and is safe to re-run:
                           board via the MCP tools and never hand-edit it.
   * `.mcp.json`         — wires the project to the GLOBAL `kanbanger-mcp`
                           command, with EMPTY GitHub-sync placeholders.
+                          Never read or written in plugin mode.
   * `.gitignore`        — keeps local runtime files out of version control.
 
 NOTE on secrets: the GitHub-sync slots (GITHUB_TOKEN / GITHUB_REPO /
 GITHUB_PROJECT_NUMBER) are written ONLY as `${VAR:-}` shell-style placeholders
 in `.mcp.json`. No real secret is ever written by this module; the user fills
-them into their environment (or a local, gitignored `.env` / shell profile).
+them into the server's launch environment for MCP sync. The CLI supports a
+local, gitignored `.env`; it alone does not satisfy MCP credential preflight.
 """
 
 from __future__ import annotations
@@ -78,6 +81,13 @@ GITIGNORE_FILENAME = ".gitignore"
 GLOBAL_MCP_COMMAND = "kanbanger-mcp"
 
 
+def validate_install_mode(install_mode: str) -> str:
+    """Validate an explicit mode without inspecting the process environment."""
+    if install_mode not in ("standalone", "plugin"):
+        raise ValueError("install_mode must be 'standalone' or 'plugin'")
+    return install_mode
+
+
 # ---------------------------------------------------------------------------
 # Result type
 # ---------------------------------------------------------------------------
@@ -98,6 +108,7 @@ class ProvisionResult:
     updated: List[str] = field(default_factory=list)
     already_present: List[str] = field(default_factory=list)
     skipped: List[str] = field(default_factory=list)
+    install_mode: str = "standalone"
 
     def summary(self) -> str:
         lines = [f"Provisioned kanbanger in: {self.project_dir}", ""]
@@ -114,12 +125,24 @@ class ProvisionResult:
             lines.append("Skipped:")
             lines.extend(f"  - {item}" for item in self.skipped)
         lines.append("")
-        lines.append(
-            "GitHub sync is OFF until you fill the placeholders in "
-            f"{MCP_JSON_FILENAME} (GITHUB_TOKEN / GITHUB_REPO / "
-            "GITHUB_PROJECT_NUMBER) via your environment or a local, "
-            "gitignored .env — no secrets are stored in the repo."
-        )
+        if self.install_mode == "plugin":
+            lines.append(
+                "GitHub sync is optional. Configure GITHUB_TOKEN / GITHUB_REPO / "
+                "GITHUB_PROJECT_NUMBER in the plugin server's process environment "
+                "via the host's launch configuration, then restart the server. "
+                "A workspace .env alone does not satisfy MCP preflight; the sync "
+                "CLI subprocess still loads .env and may override env values — "
+                "no secrets are stored in the repo."
+            )
+        else:
+            lines.append(
+                "GitHub sync is OFF until you fill the placeholders in "
+                f"{MCP_JSON_FILENAME} (GITHUB_TOKEN / GITHUB_REPO / "
+                "GITHUB_PROJECT_NUMBER) via the host's server-launch environment, "
+                "then restart the server. A workspace .env alone does not satisfy "
+                "MCP credential preflight; the sync CLI subprocess still loads "
+                ".env and may override env values — no secrets are stored in the repo."
+            )
         return "\n".join(lines)
 
 
@@ -159,7 +182,7 @@ def build_mcp_config(project_dir: Path) -> dict:
                     + project_path_fwd
                     + "}",
                     # Sync-config slots — empty placeholders only. Fill via the
-                    # environment / a local .env; do not paste secrets here.
+                    # host server-launch environment; do not paste secrets here.
                     "GITHUB_TOKEN": "${GITHUB_TOKEN:-}",
                     "GITHUB_REPO": "${GITHUB_REPO:-}",
                     "GITHUB_PROJECT_NUMBER": "${GITHUB_PROJECT_NUMBER:-}",
@@ -236,7 +259,9 @@ def ensure_gitignore_has_venv(
 # ---------------------------------------------------------------------------
 
 
-def build_claude_md_block(project_dir: Path) -> str:
+def build_claude_md_block(
+    project_dir: Path, *, install_mode: str = "standalone"
+) -> str:
     """The Kanbanger onboarding stanza injected into a project's CLAUDE.md.
 
     This is the always-loaded, pre-launch touchpoint. The server's own
@@ -247,12 +272,35 @@ def build_claude_md_block(project_dir: Path) -> str:
     (b) keep the board project-scoped, and (c) how to recover/provision when
     the board or MCP config is missing (e.g. on a fresh clone).
     """
+    validate_install_mode(install_mode)
+    if install_mode == "plugin":
+        binding = (
+            "**project-scoped** -- the existing Kanbanger plugin supplies the "
+            "MCP server.\nNo project `.mcp.json` is required for this plugin setup."
+        )
+        recovery = (
+            "**If the Kanbanger tools aren't available** in this session, "
+            "re-enable the existing Kanbanger plugin in your host and restart "
+            "the session. Verify that its workspace points to this project. "
+            "Once the tools are available, call `setup_project` again if the "
+            "board or agent guidance needs provisioning."
+        )
+    else:
+        binding = "**project-scoped** -- configured here via `.mcp.json`, not globally."
+        recovery = (
+            "**If the Kanbanger tools aren't available** in this session, kanbanger may not\n"
+            "be installed globally, or this project may not be provisioned yet (no\n"
+            "`_kanban.md` / `.mcp.json`). Install once\n"
+            "(`pipx install git+https://github.com/earlyprototype/kanbanger-partymix.git`),\n"
+            "then provision this project by calling the MCP `setup_project` tool (or, for\n"
+            "CLI parity, run `kanbanger init` in the project root), and restart the session."
+        )
     return f"""{CLAUDE_MD_START}
 ## Kanbanger: task board for this project
 
 This project tracks work on a Kanban board managed by the **Kanbanger MCP
 server**. The board lives at `_kanban.md` in the project root and is
-**project-scoped** -- configured here via `.mcp.json`, not globally.
+{binding}
 The board belongs to this project.
 
 **For AI agents:**
@@ -266,12 +314,7 @@ The board belongs to this project.
   never straight to DONE; a human approves REVIEW -> DONE via `approve_done`.
   Never move your own work directly to DONE.
 
-**If the Kanbanger tools aren't available** in this session, kanbanger may not
-be installed globally, or this project may not be provisioned yet (no
-`_kanban.md` / `.mcp.json`). Install once
-(`pipx install git+https://github.com/earlyprototype/kanbanger-partymix.git`),
-then provision this project by calling the MCP `setup_project` tool (or, for
-CLI parity, run `kanbanger init` in the project root), and restart the session.
+{recovery}
 {CLAUDE_MD_END}
 """
 
@@ -288,11 +331,15 @@ def _upsert_touchpoint(target: Path, block: str) -> str:
       after a partymix upgrade refreshes the stanza without duplicating.
       ("refreshed" if the text changed, else "unchanged")
     """
+    # Follow shared-guidance symlinks as the historical direct writes did.
+    # Atomic replacement must target the referent, not detach the project link.
+    target = target.resolve()
     if not target.exists():
-        target.write_text(block, encoding="utf-8")
+        atomic_write_text(str(target), block, newline="")
         return "created"
 
-    content = target.read_text(encoding="utf-8")
+    # Preserve project-owned bytes outside the block, including CRLF newlines.
+    content = target.read_bytes().decode("utf-8")
     start_idx = content.find(CLAUDE_MD_START)
     if start_idx != -1:
         end_idx = content.find(CLAUDE_MD_END, start_idx + len(CLAUDE_MD_START))
@@ -300,25 +347,26 @@ def _upsert_touchpoint(target: Path, block: str) -> str:
             end_idx += len(CLAUDE_MD_END)
             new_content = content[:start_idx] + block.rstrip("\n") + content[end_idx:]
             if new_content != content:
-                target.write_text(new_content, encoding="utf-8")
+                atomic_write_text(str(target), new_content, newline="")
                 return "refreshed"
             return "unchanged"
         # Orphan start marker (truncated/edited file): replace from that point.
         new_content = content[:start_idx] + block
-        target.write_text(new_content, encoding="utf-8")
+        atomic_write_text(str(target), new_content, newline="")
         return "refreshed"
 
     sep = "" if content.endswith("\n") else "\n"
-    target.write_text(content + sep + "\n" + block, encoding="utf-8")
+    atomic_write_text(str(target), content + sep + "\n" + block, newline="")
     return "appended"
 
 
 def ensure_claude_md_has_kanbanger(
-    project_dir: Path, result: ProvisionResult | None = None
+    project_dir: Path, result: ProvisionResult | None = None,
+    *, install_mode: str = "standalone",
 ) -> None:
     """Idempotently add (or refresh) the Kanbanger stanza in <project>/CLAUDE.md."""
     claude_md = project_dir / CLAUDE_MD_FILENAME
-    block = build_claude_md_block(project_dir)
+    block = build_claude_md_block(project_dir, install_mode=install_mode)
     outcome = _upsert_touchpoint(claude_md, block)
     if result is None:
         return
@@ -332,7 +380,8 @@ def ensure_claude_md_has_kanbanger(
 
 
 def ensure_agents_md_has_kanbanger(
-    project_dir: Path, result: ProvisionResult | None = None
+    project_dir: Path, result: ProvisionResult | None = None,
+    *, install_mode: str = "standalone",
 ) -> None:
     """Mirror the touchpoint into AGENTS.md, but only if AGENTS.md already exists.
 
@@ -351,7 +400,7 @@ def ensure_agents_md_has_kanbanger(
                 "touchpoint covers agents. Add the stanza here too if you keep one.)"
             )
         return
-    block = build_claude_md_block(project_dir)
+    block = build_claude_md_block(project_dir, install_mode=install_mode)
     outcome = _upsert_touchpoint(agents_md, block)
     if result is None:
         return
@@ -479,6 +528,7 @@ def provision_project(
     write_gitignore: bool = True,
     write_claude_md: bool = True,
     write_agents_md: bool = True,
+    install_mode: str = "standalone",
 ) -> ProvisionResult:
     """Idempotently provision `project_dir` for kanbanger.
 
@@ -489,27 +539,39 @@ def provision_project(
 
     The flags exist so the deprecated `scripts/setup-venv.py` can keep its
     `--no-*` switches without duplicating logic. The in-MCP `setup_project`
-    tool calls this with defaults.
+    tool chooses an explicit install_mode. Plugin mode always skips MCP wiring,
+    regardless of write_mcp_json, and produces plugin recovery guidance. The
+    standalone default never infers mode from the process environment, so CLI
+    provisioning remains unchanged even inside a plugin-marked shell.
 
     Raises FileNotFoundError if `project_dir` is not an existing directory —
     provisioning targets a real workspace, it does not create the workspace
     root itself.
     """
+    validate_install_mode(install_mode)
     project_path = Path(project_dir).resolve()
     if not project_path.is_dir():
         raise FileNotFoundError(f"project directory not found: {project_path}")
 
-    result = ProvisionResult(project_dir=to_forward_slashes(project_path))
+    result = ProvisionResult(
+        project_dir=to_forward_slashes(project_path), install_mode=install_mode
+    )
 
     if scaffold_board:
         scaffold_kanban_board(project_path, result)
-    if write_mcp_json:
+    if install_mode == "plugin":
+        result.skipped.append(
+            f"MCP wiring ({MCP_JSON_FILENAME}) intentionally skipped — "
+            "the existing plugin supplies the server; project config left untouched"
+        )
+    elif write_mcp_json:
         ensure_mcp_json(project_path, result)
     if write_gitignore:
         ensure_gitignore_has_venv(project_path, result)
     if write_claude_md:
-        ensure_claude_md_has_kanbanger(project_path, result)
+        ensure_claude_md_has_kanbanger(project_path, result, install_mode=install_mode)
     if write_agents_md:
-        ensure_agents_md_has_kanbanger(project_path, result)
+        ensure_agents_md_has_kanbanger(project_path, result, install_mode=install_mode)
 
     return result
+

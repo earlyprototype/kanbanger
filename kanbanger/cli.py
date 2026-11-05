@@ -2,7 +2,8 @@
 kanbanger.cli — thin console entry points.
 
 `kanbanger init` is the CLI-parity sibling of the in-MCP `setup_project` tool:
-both call `kanbanger.provision.provision_project`, so behaviour is identical.
+both call `kanbanger.provision.provision_project`. The CLI always uses
+standalone provisioning; the MCP tool can reuse plugin-owned server wiring.
 Use it to provision a project from a terminal when you'd rather not go through
 an MCP client.
 
@@ -21,7 +22,7 @@ from .provision import provision_project
 def init(argv=None) -> int:
     """Provision a project (default: cwd) for kanbanger. Idempotent.
 
-    Mirrors the MCP `setup_project` tool via the shared provisioning code.
+    Uses standalone mode regardless of ambient plugin environment markers.
     Returns a process exit code (0 success, 1 on a bad project dir).
     """
     parser = argparse.ArgumentParser(
@@ -29,7 +30,7 @@ def init(argv=None) -> int:
         description="Provision a project for kanbanger (idempotent). Scaffolds "
                     "_kanban.md, the CLAUDE.md agent touchpoint, .mcp.json with "
                     "empty GitHub-sync placeholders, and .gitignore hygiene. "
-                    "Identical to the in-MCP setup_project tool.",
+                    "Uses standalone setup even in a plugin-marked environment.",
     )
     parser.add_argument(
         "project_dir",
@@ -83,3 +84,4 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
