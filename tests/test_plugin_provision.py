@@ -136,6 +136,53 @@ def test_plugin_refreshes_only_marker_scoped_guidance_and_is_idempotent(
         _assert_plugin_guidance(text)
 
 
+@pytest.mark.parametrize("existing_block", [False, True], ids=["append", "refresh"])
+def test_plugin_setup_preserves_symlinked_guidance_and_updates_referents(
+    tmp_path: Path, existing_block: bool,
+):
+    project = tmp_path / "project"
+    shared = tmp_path / "shared-guidance"
+    project.mkdir()
+    shared.mkdir()
+    prefix = b"# Shared instructions\r\n\r\nPreserve this custom guidance.\r\n"
+    suffix = b"\r\n## Team conventions\r\nPreserve these too.\r\n"
+    managed = (
+        CLAUDE_MD_START.encode("utf-8") + b"\r\nStale Kanbanger guidance.\r\n"
+        + CLAUDE_MD_END.encode("utf-8")
+    ) if existing_block else b""
+    original = prefix + managed + suffix
+    targets = []
+    for name in ("CLAUDE.md", "AGENTS.md"):
+        target = shared / name
+        target.write_bytes(original)
+        try:
+            (project / name).symlink_to(target)
+        except (OSError, NotImplementedError) as error:
+            pytest.skip(f"OS cannot create guidance symlinks: {error}")
+        targets.append(target)
+
+    provision_project(project, install_mode="plugin")
+
+    for target in targets:
+        link = project / target.name
+        assert link.is_symlink(), f"Provisioning replaced the {target.name} symlink"
+        assert link.resolve() == target.resolve()
+        updated = target.read_bytes()
+        assert updated.startswith(prefix)
+        if existing_block:
+            assert updated.endswith(suffix)
+        else:
+            assert updated.startswith(original)
+        assert updated.count(CLAUDE_MD_START.encode("utf-8")) == 1
+        _assert_plugin_guidance(updated.decode("utf-8"))
+
+    first = {target: target.read_bytes() for target in targets}
+    provision_project(project, install_mode="plugin")
+    for target in targets:
+        assert (project / target.name).is_symlink()
+        assert target.read_bytes() == first[target]
+
+
 @pytest.mark.parametrize("entrypoint", ["provision", "cli"])
 def test_standalone_entrypoints_ignore_ambient_plugin_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entrypoint: str,
