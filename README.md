@@ -53,7 +53,14 @@ Rejection isn't a dead end either: `reject_review` opens a new `Rework: <title>`
 
 **Claude Code marketplace option:** Install [uv/uvx](https://docs.astral.sh/uv/getting-started/installation/)
 and Git on the host's `PATH` (Python 3.10+ must be available or downloadable by uv),
-then run these in an interactive Claude Code session:
+then install with one command in an interactive Claude Code **2.1.275+** session:
+
+```text
+/plugin install kanbanger --marketplace earlyprototype/early-prototype
+```
+
+Accept the normal marketplace confirmation and complete installation in the
+plugin panel. For older versions, use the two-step fallback:
 
 ```text
 /plugin marketplace add earlyprototype/early-prototype
