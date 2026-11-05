@@ -325,6 +325,9 @@ def _upsert_touchpoint(target: Path, block: str) -> str:
       after a partymix upgrade refreshes the stanza without duplicating.
       ("refreshed" if the text changed, else "unchanged")
     """
+    # Follow shared-guidance symlinks as the historical direct writes did.
+    # Atomic replacement must target the referent, not detach the project link.
+    target = target.resolve()
     if not target.exists():
         atomic_write_text(str(target), block, newline="")
         return "created"
