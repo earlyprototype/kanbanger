@@ -2,6 +2,21 @@
 
 ## TL;DR
 
+**Claude Code marketplace option:** Install [uv/uvx](https://docs.astral.sh/uv/getting-started/installation/)
+and Git on the host's `PATH` (Python 3.10+ must be available or downloadable by uv).
+In an interactive Claude Code session, run:
+
+```text
+/plugin marketplace add earlyprototype/early-prototype
+/plugin install kanbanger@early-prototype
+```
+
+Complete installation in the panel, call `setup_project()` for your project, then
+restart the session to load guidance. No global Kanbanger executable is needed;
+first launch downloads the pinned server and dependencies. Follow the
+[marketplace plugin guide](https://github.com/earlyprototype/early-prototype/blob/main/plugins/kanbanger/README.md)
+for first use, migration and separate manual Cursor/Codex MCP routes.
+
 Already using a Kanbanger plugin? Call `setup_project()` through that plugin.
 Its server launcher should set `KANBANGER_INSTALL_MODE=plugin`; alternatively,
 call `setup_project(install_mode="plugin")` explicitly. This provisions the

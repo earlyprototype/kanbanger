@@ -51,6 +51,21 @@ Rejection isn't a dead end either: `reject_review` opens a new `Rework: <title>`
 
 ## Quick start
 
+**Claude Code marketplace option:** Install [uv/uvx](https://docs.astral.sh/uv/getting-started/installation/)
+and Git on the host's `PATH` (Python 3.10+ must be available or downloadable by uv),
+then run these in an interactive Claude Code session:
+
+```text
+/plugin marketplace add earlyprototype/early-prototype
+/plugin install kanbanger@early-prototype
+```
+
+Complete installation in the panel, then ask for `setup_project()` in your project
+and restart the session to load its guidance. No global Kanbanger installation is
+required. See the [plugin guide](https://github.com/earlyprototype/early-prototype/blob/main/plugins/kanbanger/README.md)
+for first use, migration and separate manual Cursor/Codex MCP routes. First launch
+downloads the pinned server and dependencies.
+
 **Using an existing Kanbanger plugin?** Ask your assistant to call
 `setup_project()`. Plugin launchers should set `KANBANGER_INSTALL_MODE=plugin`
 in the server environment; `setup_project(install_mode="plugin")` is an explicit
