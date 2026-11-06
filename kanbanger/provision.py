@@ -310,6 +310,9 @@ The board belongs to this project.
   locking, and atomic writes and will eventually corrupt the board or its
   GitHub sync.
 - On first contact, read the `kanban://current-board` resource before acting.
+- **TODO is the default** for new agreed tasks, regardless of priority.
+  **BACKLOG is only for work the user explicitly pauses or defers.**
+  Not having started a task does not mean it is paused. DOING means active work.
 - **REVIEW gates DONE.** AI-completed work goes to REVIEW via `propose_done`,
   never straight to DONE; a human approves REVIEW -> DONE via `approve_done`.
   Never move your own work directly to DONE.
@@ -427,10 +430,10 @@ def build_kanban_board(project_name: str) -> str:
     return f"""# {project_name} Kanban
 
 ## BACKLOG
-<!-- Future / unprioritised work -->
+<!-- Work explicitly paused or deferred by the user -->
 
 ## TODO
-<!-- Ready to start, prioritised -->
+<!-- Agreed work awaiting execution; default for new tasks -->
 
 ## DOING
 <!-- In progress (keep to 1-3 items) -->

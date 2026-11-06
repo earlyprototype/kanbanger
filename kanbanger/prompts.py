@@ -37,14 +37,14 @@ This project uses a kanban board (_kanban.md) for task tracking and syncs with G
 
 ## Workflow Best Practices:
 1. **Before starting work:** Check current board state (kanban://current-board)
-2. **When planning:** Add tasks to BACKLOG or TODO
+2. **When planning:** Add new agreed tasks to TODO by default, regardless of priority; use BACKLOG only when the user explicitly pauses or defers them
 3. **When starting:** Move task to DOING (limit 1-2 tasks in progress)
 4. **When AI-complete:** Move task to REVIEW (a human approves REVIEW -> DONE; never move to DONE yourself)
 5. **Periodically:** Sync to GitHub with sync_to_github()
 
 ## Column Definitions:
-- **BACKLOG**: Future ideas, features, and tasks not yet prioritized
-- **TODO**: Ready to start, prioritized tasks
+- **BACKLOG**: Tasks explicitly paused or deferred by the user
+- **TODO**: Agreed tasks awaiting work; the default for new tasks, regardless of priority
 - **DOING**: Currently in progress (keep this small - focus!)
 - **REVIEW**: AI-completed work awaiting human approval
 - **DONE**: Completed tasks, human-approved (keep for record)
@@ -58,8 +58,9 @@ This project uses a kanban board (_kanban.md) for task tracking and syncs with G
 ## When to Update Board:
 - Starting a new task → move to DOING
 - Finishing AI work → move to REVIEW (a human approves REVIEW → DONE)
-- Planning new work → add to BACKLOG or TODO
-- Changing priorities → reorder or move tasks
+- Planning new agreed work → add to TODO by default
+- User explicitly pauses or defers work → move to BACKLOG
+- Changing priorities → reorder tasks within TODO; not having started does not mean paused
 - After significant progress → sync to GitHub
 
 Remember: The kanban board is the source of truth for project status!"""
@@ -93,7 +94,7 @@ Break down this goal into specific, actionable tasks suitable for the kanban boa
 For each task, provide:
 - **Title**: Concise, action-oriented (e.g., "Implement user login API")
 - **Description**: What needs to be done and why
-- **Column**: BACKLOG (future) or TODO (ready now)
+- **Column**: TODO by default; BACKLOG only when the user explicitly pauses or defers the task
 - **Complexity**: S (small), M (medium), L (large)
 - **Dependencies**: Other tasks that must complete first (if any)
 

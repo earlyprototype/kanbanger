@@ -60,6 +60,11 @@ Never hand-create or hand-edit the board.
 
 If `_kanban.md` already exists, proceed normally.
 
+## Task columns
+New agreed tasks go to TODO by default, regardless of priority.
+BACKLOG is only for work the user explicitly pauses or defers; not having
+started a task does not mean it is paused. DOING means active work.
+
 ## Capabilities
 - Tools: add, move, delete, list tasks; propose_done / approve_done /
   reject_review (the REVIEW gate); sync to GitHub; setup_project;
