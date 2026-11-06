@@ -18,10 +18,10 @@ kanbanger is an **MCP (Model Context Protocol) server** that gives AI assistants
   # Project Kanban
 
   ## BACKLOG
-  *   [ ] Future feature ideas
+  *   [ ] Work explicitly paused or deferred by the user
 
   ## TODO
-  *   [ ] Ready to start, prioritised
+  *   [ ] Agreed work awaiting execution (default for new tasks)
 
   ## DOING
   *   [ ] Currently active work
@@ -34,6 +34,11 @@ kanbanger is an **MCP (Model Context Protocol) server** that gives AI assistants
   ```
 
   A board with only four columns gets the REVIEW column added automatically at server start.
+
+  **TODO is the default for new agreed tasks, regardless of priority.** Use
+  **BACKLOG only when the user explicitly pauses or defers work**. A task that
+  has not started belongs in TODO unless the user has deferred it. DOING means
+  active work; REVIEW means AI-completed work awaiting human approval.
 
 - **AI drives it through MCP tools.** `add_task`, `move_task`, `list_tasks`, … — every change is validated, locked, and written atomically. Agents never hand-edit the file. Full rules for AI agents: [LLM_GUIDANCE.md](LLM_GUIDANCE.md).
 

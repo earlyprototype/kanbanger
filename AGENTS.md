@@ -2,6 +2,14 @@
 
 Guidance for AI agents working in this repository.
 
+## Task-column policy
+
+Use Kanbanger MCP tools to manage the board. New agreed tasks go to **TODO**
+by default, regardless of priority. **BACKLOG** is only for work the user
+explicitly pauses or defers; do not infer a pause because a task has not
+started. **DOING** means active work. AI-completed work goes to **REVIEW**
+via `propose_done`; a human approves **DONE** via `approve_done`.
+
 ## Cursor Cloud specific instructions
 
 ### What this repo is

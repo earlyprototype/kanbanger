@@ -53,6 +53,11 @@ Read-only resources, always available: `kanban://current-board`,
 
 The board has five columns: **BACKLOG → TODO → DOING → REVIEW → DONE.**
 
+New agreed tasks go to **TODO** by default, regardless of priority.
+**BACKLOG** is only for work the user explicitly pauses or defers. Not having
+started a task does not mean it is paused. Move work to **DOING** when actively
+working on it. Changing priority alone does not move a task out of TODO.
+
 REVIEW is the AI/human handoff gate. When you finish a task:
 
 1. Call `propose_done(title)` — this moves it to **REVIEW**, not DONE.
@@ -71,10 +76,10 @@ board for the first time, use this exact shape:
 # <Project Name> Kanban
 
 ## BACKLOG
-*   [ ] Future / unprioritised work
+*   [ ] Work explicitly paused or deferred by the user
 
 ## TODO
-*   [ ] Ready to start, prioritised
+*   [ ] Agreed work awaiting execution (default for new tasks)
 
 ## DOING
 *   [ ] In progress (keep to 1-3 items)

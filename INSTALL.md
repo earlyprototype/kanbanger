@@ -134,6 +134,12 @@ What provisioning writes — idempotent, safe to re-run:
    stanza only if that file already exists.
 4. `.gitignore` — ensures a stray `.venv/` stays out of version control.
 
+New agreed tasks default to **TODO**, regardless of priority. **BACKLOG** is
+only for work the user explicitly pauses or defers; **DOING** is active work.
+After updating the server, rerun `setup_project()` to refresh the managed agent
+guidance. Existing boards and task positions are preserved; correct any old
+project-specific column rules separately, using MCP tools for task moves.
+
 After provisioning, **restart the Claude session** — `.mcp.json` is read at
 session start, so the kanbanger tools only appear in a fresh session.
 
