@@ -33,57 +33,13 @@ def create_server(*, host=None, port=None, debug=False) -> FastMCP:
     server = FastMCP(
         name="kanbanger",
         instructions="""
-Kanbanger MCP Server - Task Management via Kanban Boards
+Kanbanger manages <workspace>/_kanban.md, with optional GitHub Projects V2 sync.
+If the board is missing, ask the user before calling setup_project.
 
-This server manages a markdown kanban board (`_kanban.md`) for the current
-project, optionally synced to GitHub Projects V2.
-
-## Workspace
-The board is `<workspace>/_kanban.md`. <workspace> is the KANBANGER_WORKSPACE
-environment variable, or the current working directory if it is unset.
-
-## First contact - is Kanbanger set up in this project?
-Before using any other tool, check whether the board exists: read the
-`kanban://current-board` resource (or look for `_kanban.md` in the workspace).
-
-If `_kanban.md` does NOT exist, Kanbanger is not set up in this project yet.
-Do NOT silently create it. Tell the user, and ask if they want to set
-Kanbanger up here. If they agree, call the `setup_project` tool: it
-provisions the project idempotently - scaffolds the canonical 5-column
-board (BACKLOG -> TODO -> DOING -> REVIEW -> DONE) and adds the agent
-touchpoint. Plugin launchers set KANBANGER_INSTALL_MODE=plugin so setup
-reuses the existing plugin's MCP wiring and leaves `.mcp.json` untouched.
-Without that marker, setup defaults to standalone mode and writes an absent
-`.mcp.json` targeting global `kanbanger-mcp`, like `kanbanger init`.
-The optional setup_project install_mode argument overrides the marker.
-Never hand-create or hand-edit the board.
-
-If `_kanban.md` already exists, proceed normally.
-
-## Task columns
-New agreed tasks go to TODO by default, regardless of priority.
-BACKLOG is only for work the user explicitly pauses or defers; not having
-started a task does not mean it is paused. DOING means active work.
-
-## Capabilities
-- Tools: add, move, delete, list tasks; propose_done / approve_done /
-  reject_review (the REVIEW gate); sync to GitHub; setup_project;
-  doctor (workspace health checks -- run it on first contact, after
-  setup_project, or whenever sync errors).
-- Resources: current board (kanban://current-board), stats, sync status,
-  config.
-- Prompts: kanban awareness, task planning, daily standup, review-gate
-  etiquette, sync check.
-
-## Optional GitHub sync
-Real sync requires GITHUB_TOKEN and GITHUB_REPO in the server's process
-environment. Configure them through the host's server-launch settings and
-restart the server. A workspace .env alone does not satisfy MCP preflight;
-the sync CLI subprocess still loads .env and can override inherited values.
-
-## REVIEW gates DONE
-AI-completed work moves to REVIEW, never straight to DONE. A human approves
-REVIEW -> DONE.
+Read each tool's description for when to use it, its preconditions and the
+REVIEW gate. AI-completed work goes from DOING to REVIEW via propose_done.
+A human approves the move from REVIEW to DONE via approve_done. Never use
+move_task to reach DONE.
         """.strip(),
         **settings,
     )

@@ -13,8 +13,10 @@ import difflib
 import subprocess
 import threading
 from contextlib import redirect_stdout
-from typing import Optional, Tuple
+from typing import Annotated, Optional, Tuple
+
 from mcp.server.fastmcp import FastMCP
+from pydantic import Field
 
 # Root module, like kanban_io: the shared doctor core (issue #23). It never
 # imports the mcp SDK; this package consumes its structured results.
@@ -282,24 +284,33 @@ def register_tools(server: FastMCP):
     """Register all tools with the MCP server."""
     
     @server.tool()
-    def add_task(title: str, column: str = "TODO", description: str = "") -> str:
-        """
-        Add a new task to the kanban board.
+    def add_task(
+        title: Annotated[
+            str, Field(description=(
+                "Concise, action-oriented title on one line (up to 500 characters). "
+                "Cannot start with '## ' or '* ['."
+            ))
+        ],
+        column: Annotated[
+            str, Field(description="Existing board column other than DONE.")
+        ] = "TODO",
+        description: Annotated[
+            str, Field(description="Optional context shown after the title.")
+        ] = "",
+    ) -> str:
+        """Use this when recording new work, such as a feature or a follow-up.
 
-        Args:
-            title: Task title (required, should be concise and action-oriented)
-            column: Target column - any column except canonical DONE in the board's
-                ``## section`` headers (default: TODO). The set is whatever
-                the board declares; common values are BACKLOG, TODO, DOING,
-                REVIEW. DONE requires the review/approval path: create work in
-                DOING, then propose_done(title) and approve_done(title).
-            description: Optional task description for additional context
+        New tasks go to TODO by default. Use BACKLOG only when the user
+        explicitly pauses or defers the work.
 
-        Returns:
-            Success message or error description
+        The workspace must contain _kanban.md. If the board is missing, this
+        returns kanban_not_found. Ask the user before calling setup_project.
 
-        Example:
-            add_task("Implement user authentication", "TODO", "Add JWT-based auth system")
+        Creating a task in DONE returns gate_violation. When work in DOING
+        is complete, call propose_done(title) to send it to REVIEW. A human
+        approves it with approve_done(title).
+
+        Returns a confirmation on success or a JSON error with an error_code.
         """
         kanban_path = get_kanban_path()
 
@@ -411,34 +422,28 @@ def register_tools(server: FastMCP):
         return f"Successfully added task '{title}' to {column}"
     
     @server.tool()
-    def move_task(title: str, from_column: str, to_column: str) -> str:
-        """
-        Move a task from one column to another.
+    def move_task(
+        title: Annotated[str, Field(description="Exact title of the task to move.")],
+        from_column: Annotated[
+            str, Field(description="Board column that currently holds the task.")
+        ],
+        to_column: Annotated[
+            str, Field(description="Destination board column. Use approve_done for DONE.")
+        ],
+    ) -> str:
+        """Use this when changing a task's status, such as moving TODO to DOING.
 
-        Args:
-            title: Exact title of the task to move
-            from_column: Source column — any column present in the board
-            to_column: Destination column — any column present in the board
+        Never use move_task to reach DONE. A move to DONE from any column
+        except REVIEW returns gate_violation. When work is ready, call
+        propose_done(title) to move it from DOING to REVIEW. A human uses
+        approve_done(title) to move it from REVIEW to DONE, or
+        reject_review(title, reason) to request rework.
 
-        Returns:
-            Success message or error description
+        The workspace must contain _kanban.md. If the board is missing, this
+        returns kanban_not_found. Ask the user before calling setup_project.
 
-        Example:
-            move_task("Implement user authentication", "TODO", "DOING")
-
-        Workflow:
-            DONE is gated. A direct move into DONE is only accepted when
-            from_column is REVIEW; every other from_column -> DONE call
-            is rejected with error_code "gate_violation". The canonical
-            path to DONE is propose_done(title) (DOING -> REVIEW) followed
-            by approve_done(title) (REVIEW -> DONE) — or reject_review(title,
-            reason) if the work needs changes. Do NOT use move_task to mark
-            work complete.
-
-        Note:
-            - Task title must match exactly
-            - Moving REVIEW -> DONE marks the task completed [x]
-            - Moving a task out of DONE unchecks it [ ]
+        Moving a task out of DONE clears its checkbox. Returns a confirmation
+        on success or a JSON error with an error_code.
         """
         kanban_path = get_kanban_path()
 
