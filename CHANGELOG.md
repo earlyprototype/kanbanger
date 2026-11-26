@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.1] - 2026-11-26
+
+### Changed
+- New projects start with five empty board columns. In both the CLI and MCP,
+  a dry run shows which cards a sync would create, update, or archive, in
+  order. The preview needs no credentials or network access and writes no
+  sync state. A live sync follows the same plan. [PR #32](https://github.com/earlyprototype/kanbanger/pull/32)
+
+### Fixed
+- On Windows, saving a board or its sync state now retries a file replacement
+  if another process temporarily holds the destination open. If the file
+  stays locked, the write reports the error. [PR #36, issue #28](https://github.com/earlyprototype/kanbanger/pull/36)
+
 ## [3.0.0] - 2026-07-07
 
 ### Changed

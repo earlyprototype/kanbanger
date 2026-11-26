@@ -1,6 +1,21 @@
-"""Smoke test: kanban_io + kanbanger.tools import cleanly."""
+"""Smoke tests for package imports, registration, and console entry points."""
 
 from __future__ import annotations
+
+from importlib.metadata import distribution
+
+
+def test_installed_package_metadata_and_entry_points():
+    from kanbanger import __version__
+
+    package = distribution("kanbanger")
+    assert package.version == __version__
+    scripts = package.entry_points.select(group="console_scripts")
+    assert scripts.names == {
+        "kanban-sync", "kanban-doctor", "kanbanger", "kanbanger-mcp",
+    }
+    for script in scripts:
+        assert callable(script.load()), script.name
 
 
 def test_kanban_io_imports():
