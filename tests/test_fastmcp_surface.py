@@ -66,6 +66,24 @@ def test_all_tools_registered(server: FastMCP):
     assert names == EXPECTED_TOOLS
 
 
+@pytest.mark.parametrize("name", ["add_task", "move_task"])
+def test_task_tool_guidance_is_visible_at_call_time(server: FastMCP, name: str):
+    tool = next(t for t in asyncio.run(server.list_tools()) if t.name == name)
+    description = tool.description
+    assert description.startswith("Use this when")
+    for term in (
+        "_kanban.md", "kanban_not_found", "setup_project",
+        "propose_done", "approve_done", "human",
+    ):
+        assert term in description
+    if name == "move_task":
+        assert "gate_violation" in description
+        assert "reject_review" in description
+        assert "never use move_task" in description.lower()
+    for parameter in tool.inputSchema["properties"].values():
+        assert parameter.get("description")
+
+
 def test_all_resources_registered(server: FastMCP):
     uris = {str(r.uri) for r in asyncio.run(server.list_resources())}
     assert uris == EXPECTED_RESOURCES

@@ -17,6 +17,7 @@
 ## DOING
 
 ## REVIEW
+*   [ ] Clarify task tool descriptions and the REVIEW gate (#29)
 
 ## DONE
 
