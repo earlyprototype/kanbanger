@@ -25,7 +25,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, Optional, Tuple
+from typing import Callable, Iterator, Optional, Tuple
 
 
 _LOCK_FILENAME = ".kanban.lock"
@@ -110,16 +110,14 @@ def insert_board_key(text: str, board_key: str) -> str:
     Placement: directly under the FIRST `# ` title line; at the very top if
     the board has no title line. Every existing byte of `text` is preserved
     — the only change is the one inserted marker line (terminated with the
-    file's own newline style, CRLF or LF, so a CRLF board stays uniformly
-    CRLF). The caller is responsible for checking the text is not already
-    keyed (extract_board_key) — this function inserts unconditionally.
+    file's own newline style). The caller checks for an existing key.
     """
     marker = format_board_key_marker(board_key)
     lines = text.splitlines(keepends=True)
     if not lines:
         return marker + "\n"
 
-    newline = "\r\n" if lines[0].endswith("\r\n") else "\n"
+    newline = next((end for end in ("\r\n", "\r", "\n") if lines[0].endswith(end)), "\n")
     insert_at = 0
     for i, line in enumerate(lines):
         # lstrip a BOM (U+FEFF escape below) so a BOM-prefixed title still
@@ -247,6 +245,8 @@ def atomic_write_text(
     content: str,
     encoding: str = "utf-8",
     newline: Optional[str] = None,
+    *,
+    before_replace: Optional[Callable[[], None]] = None,
 ) -> None:
     """Write text to path atomically.
 
@@ -264,6 +264,9 @@ def atomic_write_text(
     pass "" for no translation when the content's own line endings must be
     preserved byte-for-byte (e.g. the board-key mint into an existing
     board, ADR 0002).
+
+    Call before_replace immediately before each replacement attempt so a
+    caller can refuse to overwrite a changed source.
     """
     target_dir = os.path.dirname(os.path.abspath(path)) or "."
     fd, tmp_path = tempfile.mkstemp(
@@ -276,6 +279,8 @@ def atomic_write_text(
             f.flush()
             os.fsync(f.fileno())
         for attempt in range(_WINDOWS_REPLACE_ATTEMPTS):
+            if before_replace is not None:
+                before_replace()
             try:
                 os.replace(tmp_path, path)
                 break
@@ -376,6 +381,20 @@ class StateClaimConflict(ValueError):
     """Multiple entries claim the same state key or remote item."""
 
 
+class MalformedSyncState(ValueError):
+    """Keep readable claims available for comparison with the remote markers."""
+
+    def __init__(self, detail, state, claims):
+        super().__init__(detail)
+        state = state if isinstance(state, dict) else {}
+        self.bindings = {
+            key: state[key] for key in ("board_key", "repo_node_id", "project_id")
+            if isinstance(state.get(key), str) and state[key].strip()
+        }
+        self.version = state.get("schema_version")
+        self.claims = claims
+
+
 def load_sync_state(path: Path) -> dict:
     """Read the sidecar with the same structural checks for sync and doctor."""
     def unique_keys(pairs):
@@ -388,6 +407,23 @@ def load_sync_state(path: Path) -> dict:
 
     with path.open(encoding="utf-8") as source:
         state = json.load(source, object_pairs_hook=unique_keys)
+    tasks = state.get("tasks") if isinstance(state, dict) else None
+    claims = {}
+    if isinstance(tasks, dict):
+        for title, task in sorted(tasks.items()):
+            item_id = task.get("item_id") if isinstance(task, dict) else None
+            if isinstance(item_id, str) and item_id.strip():
+                if item_id in claims:
+                    raise StateClaimConflict(f"multiple tasks claim item {item_id}")
+                claims[item_id] = title
+    try:
+        _validate_sync_state(state)
+    except ValueError as exc:
+        raise MalformedSyncState(str(exc), state, claims) from exc
+    return state
+
+
+def _validate_sync_state(state):
     if not isinstance(state, dict) or not isinstance(state.get("tasks"), dict):
         raise ValueError("expected an object with a 'tasks' object")
     for key in ("board_key", "repo_node_id", "project_id"):
@@ -400,21 +436,16 @@ def load_sync_state(path: Path) -> dict:
     version = state.get("schema_version", 0)
     if type(version) is not int or version < 0:
         raise ValueError("invalid schema_version")
-    ids = set()
     for title, task in state["tasks"].items():
         if not title.strip() or not isinstance(task, dict):
             raise ValueError(f"invalid task record {title!r}")
         item_id = task.get("item_id")
         if not isinstance(item_id, str) or not item_id.strip():
             raise ValueError(f"invalid item_id for {title!r}")
-        if item_id in ids:
-            raise StateClaimConflict(f"multiple tasks claim item {item_id}")
-        ids.add(item_id)
         if "status" not in task or not isinstance(task["status"], (str, type(None))):
             raise ValueError(f"invalid status for {title!r}")
         if "marked" in task and type(task["marked"]) is not bool:
             raise ValueError(f"invalid marker flag for {title!r}")
-    return state
 
 
 def write_state(workspace: str, state: dict) -> None:

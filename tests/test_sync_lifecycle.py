@@ -330,7 +330,7 @@ def test_sync_migrates_legacy_ids_and_executes_local_plan(tmp_path, monkeypatch)
         if "repository(owner" in query:
             return Response({"data": {"repository": {
                 "id": "R_repo",
-                "projectsV2": {"nodes": [{
+                "projectsV2": {"pageInfo": {"hasNextPage": False}, "nodes": [{
                     "id": "PVT_project", "number": 8, "title": "Project",
                     "fields": {"nodes": [{
                         "id": "PVTSSF_status", "name": "Status",
@@ -354,12 +354,26 @@ def test_sync_migrates_legacy_ids_and_executes_local_plan(tmp_path, monkeypatch)
                     "fieldValueByName": None,
                 }, {
                     "id": "unrelated-" + title, "isArchived": False,
-                    "content": {"__typename": "Issue"}, "fieldValueByName": None,
+                    "content": {"__typename": "Issue", "id": "issue-" + title,
+                                "title": title, "body": ""}, "fieldValueByName": None,
                 }],
             }}}})
+        if "node(id: $id)" in query:
+            item_id = variables["id"]
+            title = item_id.removeprefix("PVTI_").title()
+            body = "Existing notes"
+            if title == "New":
+                body = next(call["variables"]["body"] for call in calls
+                            if "addProjectV2DraftIssue" in call["query"])
+            return Response({"data": {"node": {"id": item_id, "isArchived": False,
+                "content": {"__typename": "DraftIssue", "id": "draft-" + title,
+                            "title": title, "body": body}}}})
         if "updateProjectV2DraftIssue" in query:
-            assert variables["id"] in ("draft-Moved", "draft-Removed")
-            assert variables["body"].startswith("Existing notes\n\n<!-- kanbanger:item:v1 ")
+            title = variables["id"].removeprefix("draft-")
+            assert title in ("Moved", "Removed", "New")
+            prefix = "" if title == "New" else "Existing notes\n\n"
+            assert variables["body"].startswith(prefix + "<!-- kanbanger:item:v2 ")
+            assert variables["body"].endswith(" PVTI_" + title.lower() + " -->")
             return Response({"data": {"updateProjectV2DraftIssue": {
                 "draftIssue": {"id": variables["id"]}
             }}})
@@ -409,7 +423,7 @@ def test_created_item_is_durable_before_initial_status_failure(tmp_path):
 
     class Client:
         @staticmethod
-        def get_repo_project(owner, repo, project_number):
+        def get_repo_project(owner, repo, project_number, bound_id):
             return "R_repo", "PVT_project", "PVTSSF_status", {"Todo": "opt_todo"}
 
         @staticmethod
@@ -419,6 +433,10 @@ def test_created_item_is_durable_before_initial_status_failure(tmp_path):
         @staticmethod
         def create_draft_issue(project_id, title, body):
             return "PVTI_new"
+
+        @staticmethod
+        def mark_draft(item_id, title, expected, body):
+            assert item_id == "PVTI_new" and item_id in body
 
         @staticmethod
         def update_item_status(*args):
@@ -452,7 +470,7 @@ def test_archive_failure_keeps_state_for_retry(tmp_path):
 
     class Client:
         @staticmethod
-        def get_repo_project(owner, repo, project_number):
+        def get_repo_project(owner, repo, project_number, bound_id):
             return "R_repo", "PVT_project", "PVTSSF_status", {}
 
         @staticmethod
@@ -465,8 +483,8 @@ def test_archive_failure_keeps_state_for_retry(tmp_path):
                          archived=False, status="Done")]
 
         @staticmethod
-        def mark_draft(draft_id, body):
-            assert draft_id == "draft"
+        def mark_draft(item_id, title, expected, body):
+            assert item_id == "PVTI_removed"
 
     with pytest.raises(GitHubAPIError, match="archive failed"):
         Syncer(

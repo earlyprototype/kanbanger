@@ -180,7 +180,7 @@ Optional. Sync is currently **one-way** (markdown → GitHub Projects). Tasks be
 
 **3. One-time: set the project's Status options** to exactly `Backlog, Todo, InProgress, Review, Done` (rename GitHub's default 'In Progress'; add 'Backlog' and 'Review'). Automating this is tracked.
 
-**4. Note the project number.** It's the `N` in the project URL (`github.com/users/<you>/projects/N`). Optional — when unset, the first project linked to the repo is used — but set it whenever more than one project is linked.
+**4. Note the project number.** It's the `N` in the project URL (`github.com/users/<you>/projects/N`). Set it for first sync or recovery when the repository has multiple linked Projects. Later syncs can use the Project ID in a valid sidecar.
 
 **5.** Create a ***Classic Personal Access Token***.
 
@@ -295,23 +295,25 @@ And these **prompts**:
 | `KANBANGER_WORKSPACE` | Directory containing `_kanban.md` (defaults to the resolved project dir) |
 | `GITHUB_TOKEN` | Classic PAT with `repo` + `project` scopes |
 | `GITHUB_REPO` | `owner/repo` the Project is linked to |
-| `GITHUB_PROJECT_NUMBER` | Project number from the project URL (optional; first linked project used when unset) |
+| `GITHUB_PROJECT_NUMBER` | Project number from the project URL. Required when multiple Projects are linked and a valid sidecar cannot identify the target. |
 | `KANBANGER_SYNC_TIMEOUT_SEC` | Timeout for the `sync_to_github` tool's sync run (default 60) |
 
 ### `.kanban.json` (sync state sidecar)
 
-Sync pairs the board and Project with their GitHub item IDs in this file. Each new draft carries a hidden body comment containing the board ID and the original local task title. The comment survives a GitHub title edit and identifies a task even after its local row is removed. Keep it on the original draft. When upgrading, normal sync adds the comment to legacy drafts identified by a valid sidecar, preserving their existing body text. First sync adds a board ID to an unkeyed board.
+Sync records the board ID, Project ID and GitHub item IDs in this file. Each new draft starts with a provisional comment. Once GitHub returns the item ID, sync saves it locally and binds the comment to that ID. The bound comment also contains the board ID and original task title, so it can identify a renamed draft or a task removed from the board.
+
+First sync adds a board ID to an unkeyed board. Ordinary sync also upgrades legacy drafts and older comments when a valid sidecar confirms their item IDs. Sync rereads the board or draft immediately before inserting its marker. If the text changed, it stops so you can retry with the latest edits.
 
 #### Recover missing or corrupt state
 
 Use the same board and GitHub Project as the original sync. Run one sync at a time across copies that share a board ID.
 
 1. Run `kanban-sync _kanban.md --recover --dry-run` or call `sync_to_github(recover=True, dry_run=True)`. This reads every page of Project items. The JSON report shows the target Project, owned item IDs, unmarked drafts, legacy drafts awaiting markers, and the changes the next sync would make. A plain `--dry-run` provides only a local estimate.
-2. Check the IDs and planned archives. With lost state, an unmarked draft could be an older Kanbanger card. Restore a known-good sidecar for those cards if possible. A matching title alone cannot establish ownership. Conflicting IDs, damaged markers, and ambiguous creates stop the entire operation and name the affected items.
+2. Check the IDs and planned archives. A copied marker, a marked draft converted to an issue, or a readable sidecar claim that disagrees with the inventory stops recovery. A title match on an unmarked draft cannot establish ownership. Restore a known-good sidecar for legacy drafts. If a create response was lost and only a provisional comment survives, inspect the reported item on GitHub and resolve its ownership before retrying.
 3. Run `kanban-sync _kanban.md --recover` or call `sync_to_github(recover=True)` to rescan and write the sidecar. Recovery saves the original bytes of a corrupt sidecar next to it as `.kanban.json.corrupt-*`. It leaves GitHub untouched. Unclaimed drafts remain outside sync.
 4. Run ordinary sync to apply the changes. The ownership check runs again before the first GitHub write. Archived drafts are excluded from recovery.
 
-For the live regression test, select a disposable linked Project with `KANBANGER_SANDBOX_REPO` and `KANBANGER_SANDBOX_PROJECT_NUMBER`, set `GITHUB_TOKEN`, and run `python -m pytest tests/test_sync_recovery_sandbox.py`. The test creates uniquely named drafts, exercises both forms of state loss, and archives its test items.
+For the live regression test, select a disposable linked Project with `KANBANGER_SANDBOX_REPO` and `KANBANGER_SANDBOX_PROJECT_NUMBER`, set `GITHUB_TOKEN`, and run `python -m pytest -s tests/test_sync_recovery_sandbox.py`. The test prints the recovered IDs for both forms of state loss, the unchanged sentinel ID, and the IDs confirmed archived during cleanup.
 
 ### The board-id marker
 

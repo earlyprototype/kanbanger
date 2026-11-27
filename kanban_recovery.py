@@ -11,13 +11,27 @@ class OwnershipConflict(ValueError):
 
 
 _PREFIX = "<!-- kanbanger:item:"
-_MARKER = re.compile(rf"<!-- kanbanger:item:v1 ({BOARD_KEY_PATTERN}) ([0-9a-f]+) -->")
+_MARKER = re.compile(
+    rf"<!-- kanbanger:item:(v1|v2) ({BOARD_KEY_PATTERN}) ([0-9a-f]+)"
+    r"(?: ([A-Za-z0-9_+/=-]+))? -->"
+)
 
 
-def item_marker(board_key: str, title: str) -> str:
+def item_marker(board_key: str, title: str, item_id: str | None = None) -> str:
     # Preserve the original local key even if the draft is renamed or removed
     # from the board. Hex also keeps arbitrary Markdown out of the comment.
-    return f"{_PREFIX}v1 {board_key} {title.encode('utf-8').hex()} -->"
+    key = f"{board_key} {title.encode('utf-8').hex()}"
+    if item_id is None:
+        return f"{_PREFIX}v1 {key} -->"
+    return f"{_PREFIX}v2 {key} {item_id} -->"
+
+
+def bind_marker(body: str, board_key: str, title: str, item_id: str) -> str:
+    """Append a bound marker or replace the verified provisional footer."""
+    marker = item_marker(board_key, title, item_id)
+    if _PREFIX in body:
+        return body.replace(item_marker(board_key, title), marker, 1)
+    return body + "\n\n" + marker if body else marker
 
 
 def _read_marker(body: str):
@@ -26,14 +40,15 @@ def _read_marker(body: str):
     footer = body.rstrip().rsplit("\n", 1)[-1]
     match = _MARKER.fullmatch(footer)
     if match and body.count(_PREFIX) == 1:
-        board_key, encoded = match.groups()
+        version, board_key, encoded, item_id = match.groups()
         try:
             title = bytes.fromhex(encoded).decode("utf-8")
         except ValueError:
             pass
         else:
-            if title.strip() and "\n" not in title and "\r" not in title:
-                return board_key, title
+            if ((version == "v2") == (item_id is not None)
+                    and title.strip() and "\n" not in title and "\r" not in title):
+                return board_key, title, item_id
     raise OwnershipConflict("invalid or multiple ownership markers")
 
 
@@ -64,7 +79,7 @@ def inspect_drafts(items, board_key, stored, local, *, recover):
             conflicts.append(f"{item_id}: {exc}")
             continue
         if marker:
-            owner, title = marker
+            owner, title, bound_id = marker
             if board_key is None:
                 conflicts.append(f"{item_id}: restore the board-id marker before syncing")
                 continue
@@ -72,9 +87,26 @@ def inspect_drafts(items, board_key, stored, local, *, recover):
                 if stored_title is not None:
                     conflicts.append(f"{item_id}: belongs to another board")
                 continue
+            if item.get("type") == "Issue":
+                conflicts.append(f"{item_id}: repository issue carries the marker for {title!r}. "
+                                 "Resolve the converted draft before syncing")
+                continue
+            if bound_id is not None and bound_id != item_id:
+                conflicts.append(f"marker for {bound_id} was copied to {item_id}")
+                continue
             if stored_title is not None and title != stored_title:
                 conflicts.append(f"{item_id}: marker and sidecar name different tasks")
                 continue
+            if bound_id is None:
+                if stored_title is None:
+                    conflicts.append(f"{item_id}: unbound marker for {title!r}. Restore the "
+                                     "sidecar with the confirmed item ID or resolve it on GitHub")
+                    continue
+                result.legacy[title] = item
+        elif item.get("type") == "Issue":
+            if stored_title is not None:
+                conflicts.append(f"{item_id}: recorded draft is now a repository issue")
+            continue
         elif stored_title is not None:
             title = stored_title
             if stored[title].get("marked") or item["title"] != title:

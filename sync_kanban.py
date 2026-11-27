@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from kanban_io import (
+    MalformedSyncState,
     StateClaimConflict,
     atomic_write_json,
     atomic_write_text,
@@ -26,7 +27,7 @@ from kanban_io import (
     parse_task_title_with_description,
 )
 
-from kanban_recovery import OwnershipConflict, inspect_drafts, item_marker
+from kanban_recovery import OwnershipConflict, bind_marker, inspect_drafts, item_marker
 
 # Load environment variables from .env file if it exists.
 # override=True: the project's `.env` is the authoritative target for
@@ -87,6 +88,12 @@ class ConfigurationError(KanbangerError):
 
 class CorruptStateError(ConfigurationError):
     """State exists but its contents cannot be used."""
+
+    def __init__(self, path, cause):
+        super().__init__(f"Sync state is corrupt: {path} ({cause}). "
+                         "Restore a backup or inspect --recover --dry-run.")
+        self.bindings = cause.bindings if isinstance(cause, MalformedSyncState) else {}
+        self.claims = cause.claims if isinstance(cause, MalformedSyncState) else {}
 
 
 class BoardReadError(ConfigurationError):
@@ -152,6 +159,19 @@ class LocalBoard:
     def __init__(self, file_path: str):
         self.file_path = file_path
         self.tasks: Dict[str, List[Dict]] = {}
+
+    def read_source(self) -> str:
+        try:
+            with open(self.file_path, encoding="utf-8", newline="") as source:
+                return source.read()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise BoardReadError(
+                f"Unable to read kanban board: {self.file_path} ({exc})"
+            ) from exc
+
+    def verify_source(self):
+        if self.read_source() != self.source:
+            raise ConfigurationError("Board changed during sync. Inspect the board and retry.")
     
     def parse(self) -> Dict[str, List[Dict]]:
         """Parse a markdown kanban file and return tasks by column.
@@ -171,13 +191,8 @@ class LocalBoard:
         text so the description survives to GitHub on the first
         occurrence; only the dedup key is the stripped form.
         """
-        try:
-            with open(self.file_path, 'r', encoding='utf-8', newline='') as f:
-                content = self.source = f.read()
-        except (OSError, UnicodeDecodeError) as exc:
-            raise BoardReadError(
-                f"Unable to read kanban board: {self.file_path} ({exc})"
-            ) from exc
+        self.source = self.read_source()
+        content = self.source.replace("\r\n", "\n").replace("\r", "\n")
 
         self.board_key = extract_board_key(content)
         key_lines = re.findall(r"^[ \t]*<!--[ \t]*kanbanger:board-id:", content, re.MULTILINE)
@@ -275,10 +290,10 @@ class StateManager:
                 f"Ownership conflict: {exc}. Restore a known-good sidecar."
             ) from exc
         except (ValueError, RecursionError) as exc:
-            raise CorruptStateError(
-                f"Sync state is corrupt: {self.state_file} ({exc}). "
-                "Restore a backup or inspect --recover --dry-run."
-            ) from exc
+            if (isinstance(exc, MalformedSyncState) and type(exc.version) is int
+                    and exc.version > SCHEMA_VERSION):
+                raise ConfigurationError("Sync state requires a newer version of Kanbanger") from exc
+            raise CorruptStateError(self.state_file, exc) from exc
         except OSError as exc:
             raise ConfigurationError(f"Unable to read sync state: {self.state_file} ({exc})") from exc
         self.state.setdefault("schema_version", SCHEMA_VERSION)
@@ -391,16 +406,18 @@ class GitHubClient:
         
         return data
     
-    def get_repo_project(self, owner: str, repo_name: str, project_number: Optional[int] = None) -> Tuple[str, str, str, Dict]:
+    def get_repo_project(self, owner: str, repo_name: str, project_number: Optional[int] = None,
+                         bound_id: Optional[str] = None) -> Tuple[str, str, str, Dict]:
         """
         Get project information via repository lookup.
         Returns: (repo_node_id, project_id, status_field_id, status_options)
         """
         query = """
-        query($owner: String!, $repo: String!) {
+        query($owner: String!, $repo: String!, $cursor: String) {
             repository(owner: $owner, name: $repo) {
                 id
-                projectsV2(first: 10) {
+                projectsV2(first: 10, after: $cursor) {
+                    pageInfo { hasNextPage endCursor }
                     nodes {
                         id
                         number
@@ -423,31 +440,43 @@ class GitHubClient:
         }
         """
         
-        variables = {"owner": owner, "repo": repo_name}
-        
-        data = self._query(query, variables)
-        
-        repo = (data.get("data") or {}).get("repository")
-        if not repo:
-            raise GitHubAPIError("GitHub API returned no readable repository")
+        projects = []
+        cursor = None
+        cursors = set()
+        while True:
+            data = self._query(query, {"owner": owner, "repo": repo_name, "cursor": cursor})
+            repo = (data.get("data") or {}).get("repository")
+            if not repo:
+                raise GitHubAPIError("GitHub API returned no readable repository")
+            page = repo["projectsV2"]
+            projects.extend(page["nodes"])
+            info = page["pageInfo"]
+            if info["hasNextPage"] is False:
+                break
+            cursor = info["endCursor"]
+            if info["hasNextPage"] is not True or not cursor or cursor in cursors:
+                raise GitHubAPIError("GitHub API returned incomplete linked Projects")
+            cursors.add(cursor)
         repo_node_id = repo["id"]
-        projects = repo["projectsV2"]["nodes"]
         
         if not projects:
             raise ProjectNotFoundError(
                 f"No projects found linked to {owner}/{repo_name}"
             )
 
-        # Find the right project
-        project = None
-        if project_number:
-            project = next((p for p in projects if p["number"] == project_number), None)
-            if not project:
-                raise ProjectNotFoundError(
-                    f"Project #{project_number} not found"
-                )
-        else:
-            project = projects[0]
+        if project_number is not None:
+            projects = [p for p in projects if p["number"] == project_number]
+            if not projects:
+                raise ProjectNotFoundError(f"Project #{project_number} not found")
+        if bound_id is not None:
+            projects = [p for p in projects if p["id"] == bound_id]
+            if not projects:
+                raise ConfigurationError(f"Ownership conflict: expected linked Project {bound_id}")
+        if len(projects) != 1:
+            raise ConfigurationError("Multiple linked Projects match. Select the original Project "
+                                     "with --project or GITHUB_PROJECT_NUMBER.")
+        project = projects[0]
+        if project_number is None:
             print(f"Info: Using project #{project['number']}: {project['title']}", file=sys.stderr)
 
         project_id = project["id"]
@@ -478,7 +507,11 @@ class GitHubClient:
                         pageInfo { hasNextPage endCursor }
                         nodes {
                             id isArchived
-                            content { __typename ... on DraftIssue { id title body } }
+                            content {
+                                __typename
+                                ... on DraftIssue { id title body }
+                                ... on Issue { id title body }
+                            }
                             fieldValueByName(name: $status) {
                                 ... on ProjectV2ItemFieldSingleSelectValue { name }
                             }
@@ -508,9 +541,9 @@ class GitHubClient:
                         items.append({"id": item_id, "archived": True})
                         continue
                     content = node["content"]
-                    if content and content["__typename"] in ("Issue", "PullRequest"):
+                    if content and content["__typename"] == "PullRequest":
                         continue
-                    if not content or content["__typename"] != "DraftIssue":
+                    if not content or content["__typename"] not in ("DraftIssue", "Issue"):
                         raise ValueError("unreadable project item")
                     if not all(isinstance(content[key], str) for key in ("id", "body", "title")):
                         raise ValueError("unreadable draft")
@@ -519,7 +552,9 @@ class GitHubClient:
                         raise ValueError("invalid status field value")
                     if type(node["isArchived"]) is not bool or not content["id"]:
                         raise ValueError("incomplete project item")
-                    items.append(dict(id=node["id"], draft_id=content["id"],
+                    kind = content["__typename"]
+                    items.append(dict(id=item_id, type=kind,
+                                      draft_id=content["id"] if kind == "DraftIssue" else None,
                                       title=content["title"], body=content["body"],
                                       archived=node["isArchived"],
                                       status=None if status is None else status["name"]))
@@ -533,7 +568,26 @@ class GitHubClient:
             except (KeyError, TypeError, ValueError) as exc:
                 raise GitHubAPIError(f"GitHub API returned an incomplete project inventory: {exc}") from exc
 
-    def mark_draft(self, draft_id: str, body: str):
+    def mark_draft(self, item_id: str, expected_title: str, expected_body: str, body: str):
+        """Recheck the item and its text immediately before replacing the body."""
+        query = """
+        query($id: ID!) {
+            node(id: $id) {
+                ... on ProjectV2Item {
+                    id isArchived
+                    content { __typename ... on DraftIssue { id title body } }
+                }
+            }
+        }
+        """
+        data = self._query(query, {"id": item_id})
+        item = (data.get("data") or {}).get("node") or {}
+        draft = item.get("content") or {}
+        if (item.get("id") != item_id or item.get("isArchived") is not False
+                or draft.get("__typename") != "DraftIssue" or not draft.get("id")
+                or draft.get("title") != expected_title or draft.get("body") != expected_body):
+            raise ConfigurationError(f"Draft {item_id} changed during sync. Inspect it and retry.")
+        draft_id = draft["id"]
         mutation = """
         mutation($id: ID!, $body: String!) {
             updateProjectV2DraftIssue(input: {draftIssueId: $id, body: $body}) {
@@ -565,7 +619,11 @@ class GitHubClient:
         }
         
         data = self._query(mutation, variables)
-        return data["data"]["addProjectV2DraftIssue"]["projectItem"]["id"]
+        created = (data.get("data") or {}).get("addProjectV2DraftIssue") or {}
+        item_id = (created.get("projectItem") or {}).get("id")
+        if not isinstance(item_id, str) or not item_id:
+            raise GitHubAPIError("GitHub API returned no item ID for the new draft")
+        return item_id
     
     def update_item_status(self, project_id: str, item_id: str, status_field_id: str, status_option_id: str):
         """Update the status field of a project item."""
@@ -639,6 +697,7 @@ class Syncer:
 
         state_kind = "valid" if self.state.state_file.exists() else "missing"
         state_error = None
+        damaged_claims = {}
         try:
             self.state.load()
         except CorruptStateError as exc:
@@ -646,10 +705,12 @@ class Syncer:
                 raise
             state_kind = "corrupt"
             state_error = str(exc)
-            self.state.state = self.state.empty_state()
+            self.state.state = dict(self.state.empty_state(), **exc.bindings)
+            damaged_claims = exc.claims
         self.state.verify_board_key(board_key)
+        bound_id = self.state.state.get("project_id") if state_kind == "valid" else None
         repo_id, project_id, field_id, options = self.client.get_repo_project(
-            *parts, project_number
+            *parts, project_number, bound_id
         )
         for key, expected in (("repo_node_id", repo_id), ("project_id", project_id)):
             if self.state.state.get(key) not in (None, expected):
@@ -662,6 +723,10 @@ class Syncer:
             )
         except OwnershipConflict as exc:
             raise ConfigurationError(f"Ownership conflict: {exc}") from exc
+        for item_id, title in sorted(damaged_claims.items()):
+            if inventory.tasks.get(title, {}).get("item_id") != item_id:
+                raise ConfigurationError(f"Ownership conflict: cannot verify corrupt sidecar "
+                                         f"claim {item_id} for {title!r}. Restore a backup.")
         missing_records = inventory.tasks.keys() - self.state.state["tasks"].keys()
         if not recover and (missing_records or (state_kind == "missing" and inventory.unmarked)):
             raise ConfigurationError(
@@ -682,24 +747,25 @@ class Syncer:
                 report["state_error"] = state_error
             if preview:
                 return report
-            if state_kind == "corrupt":
-                report["backup"] = str(self.state.backup_corrupt_state())
 
         if board_key is None:
             board_key = mint_board_key()
             atomic_write_text(self.board.file_path, insert_board_key(self.board.source, board_key),
-                              newline="")
+                              newline="", before_replace=self.board.verify_source)
             self.state.verify_board_key(board_key)
+        else:
+            self.board.verify_source()
         if recover:
+            if state_kind == "corrupt":
+                report["backup"] = str(self.state.backup_corrupt_state())
             self.state.save_unlocked()
             report["board_key"] = board_key
             return report
 
         # A valid legacy sidecar supplies the item IDs for this migration.
         for title, item in inventory.legacy.items():
-            marker = item_marker(board_key, title)
-            body = item["body"] + "\n\n" + marker if item["body"] else marker
-            self.client.mark_draft(item["draft_id"], body)
+            body = bind_marker(item["body"], board_key, title, item["id"])
+            self.client.mark_draft(item["id"], item["title"], item["body"], body)
             self.state.state["tasks"][title]["marked"] = True
 
         self._apply_plan(plan, project_id, field_id, options, board_key)
@@ -714,7 +780,8 @@ class Syncer:
             if action == "CREATE":
                 # New task - create it
                 print(f"  [CREATE] {title} => {desired_status}")
-                item_id = self.client.create_draft_issue(project_id, title, item_marker(board_key, title))
+                provisional = item_marker(board_key, title)
+                item_id = self.client.create_draft_issue(project_id, title, provisional)
                 # D7+D12: persist item_id with status=None first. The
                 # confirmed status is only persisted AFTER the status
                 # update mutation succeeds. Prevents the stuck-no-status
@@ -724,6 +791,8 @@ class Syncer:
                 # next sync sees stored == desired and skips forever).
                 self.state.update_task(title, item_id, None)
                 self.state.save_unlocked()
+                bound_marker = item_marker(board_key, title, item_id)
+                self.client.mark_draft(item_id, title, provisional, bound_marker)
 
                 # Set initial status
                 if desired_status in status_options:

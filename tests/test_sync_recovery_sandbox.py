@@ -1,5 +1,6 @@
 """Operator-run recovery test for a disposable, linked GitHub Project."""
 
+import json
 import os
 from uuid import uuid4
 
@@ -28,6 +29,7 @@ def test_recover_in_github_project(tmp_path):
 
     # Record this run's IDs, including a draft created before a later failure.
     created = set()
+    recovered = {}
     create = client.create_draft_issue
 
     def record_create(project_id, title, body=""):
@@ -51,6 +53,7 @@ def test_recover_in_github_project(tmp_path):
                 sync()
             preview = sync(recover=True, preview=True)
             assert preview["owned"] == {title: owned}
+            recovered["corrupt" if corrupt else "missing"] = preview["owned"][title]
             assert preview["unmarked"][sentinel] == title
             assert preview == sync(recover=True, preview=True)
             sync(recover=True)
@@ -71,3 +74,8 @@ def test_recover_in_github_project(tmp_path):
         for row in client.get_project_items(project):
             if row["id"] in created and not row["archived"]:
                 client.archive_item(project, row["id"])
+        archived = sorted(row["id"] for row in client.get_project_items(project)
+                          if row["id"] in created and row["archived"])
+        assert archived == sorted(created)
+    print(json.dumps({"project_id": project, "recovered_item_ids": recovered,
+                      "unchanged_sentinel_id": sentinel, "archived_at_cleanup": archived}))
