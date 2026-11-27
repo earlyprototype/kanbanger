@@ -264,7 +264,7 @@ def test_provision_ignores_all_local_runtime_files_idempotently(tmp_path: Path):
     second = provision_project(tmp_path)
 
     expected_ignored = [
-        ".env", ".env.local", ".kanban.json", ".kanban.lock",
+        ".env", ".env.local", ".kanban.json", ".kanban.json.corrupt-*", ".kanban.lock",
         ".claude/settings.local.json", ".venv/",
     ]
     entries = gitignore_path.read_text(encoding="utf-8").splitlines()

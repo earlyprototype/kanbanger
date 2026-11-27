@@ -245,7 +245,7 @@ Your AI assistant gets these **tools**:
 | `approve_done(title)` | Approve a REVIEW task to DONE (human decision) |
 | `reject_review(title, reason)` | Send a REVIEW task back with feedback |
 | `doctor(network?)` | Health-check the workspace binding, board file, and sync config |
-| `sync_to_github(dry_run?)` | Preview locally with `dry_run`; otherwise sync to GitHub |
+| `sync_to_github(dry_run?, recover?)` | Preview locally with `dry_run`. Use `recover` to inspect GitHub ownership and rebuild local state. |
 | `get_sync_status()` | Check sync state |
 
 These **resources** (always visible):
@@ -300,7 +300,18 @@ And these **prompts**:
 
 ### `.kanban.json` (sync state sidecar)
 
-Created next to the board on first real sync. It pairs local task titles with their GitHub item ids so re-syncs update instead of duplicate. It's machine-state, not content — provisioning already adds it to `.gitignore`. If it's deleted, the next sync re-creates state (and can duplicate items already on the Project), so leave it alone.
+Sync pairs the board and Project with their GitHub item IDs in this file. Each new draft carries a hidden body comment containing the board ID and the original local task title. The comment survives a GitHub title edit and identifies a task even after its local row is removed. Keep it on the original draft. When upgrading, normal sync adds the comment to legacy drafts identified by a valid sidecar, preserving their existing body text. First sync adds a board ID to an unkeyed board.
+
+#### Recover missing or corrupt state
+
+Use the same board and GitHub Project as the original sync. Run one sync at a time across copies that share a board ID.
+
+1. Run `kanban-sync _kanban.md --recover --dry-run` or call `sync_to_github(recover=True, dry_run=True)`. This reads every page of Project items. The JSON report shows the target Project, owned item IDs, unmarked drafts, legacy drafts awaiting markers, and the changes the next sync would make. A plain `--dry-run` provides only a local estimate.
+2. Check the IDs and planned archives. With lost state, an unmarked draft could be an older Kanbanger card. Restore a known-good sidecar for those cards if possible. A matching title alone cannot establish ownership. Conflicting IDs, damaged markers, and ambiguous creates stop the entire operation and name the affected items.
+3. Run `kanban-sync _kanban.md --recover` or call `sync_to_github(recover=True)` to rescan and write the sidecar. Recovery saves the original bytes of a corrupt sidecar next to it as `.kanban.json.corrupt-*`. It leaves GitHub untouched. Unclaimed drafts remain outside sync.
+4. Run ordinary sync to apply the changes. The ownership check runs again before the first GitHub write. Archived drafts are excluded from recovery.
+
+For the live regression test, select a disposable linked Project with `KANBANGER_SANDBOX_REPO` and `KANBANGER_SANDBOX_PROJECT_NUMBER`, set `GITHUB_TOKEN`, and run `python -m pytest tests/test_sync_recovery_sandbox.py`. The test creates uniquely named drafts, exercises both forms of state loss, and archives its test items.
 
 ### The board-id marker
 

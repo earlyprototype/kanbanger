@@ -75,7 +75,7 @@ setup(
         "Topic :: Utilities",
     ],
     packages=find_packages(exclude=["tests", "tests.*"]),
-    py_modules=["sync_kanban", "kanban_io", "kanban_doctor"],
+    py_modules=["sync_kanban", "kanban_io", "kanban_doctor", "kanban_recovery"],
     install_requires=[
         "requests>=2.25.0",
         "python-dotenv>=0.19.0",

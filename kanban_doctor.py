@@ -817,19 +817,19 @@ def check_state_file(workspace):
         _emit(PASS_TAG, label,
               "no state file yet (will be created on first sync_to_github)")
         return
+    from kanban_io import load_sync_state
+
     try:
-        data = json.loads(state_file.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        _emit(FAIL_TAG, label, ".kanban.json is not valid JSON",
-              "Delete the file -- R7 backup-and-reset will run on next sync.")
-        return
-    except Exception as e:
-        _emit(WARN_TAG, label, f"could not read: {e}", "")
+        data = load_sync_state(state_file)
+    except (ValueError, RecursionError, OSError) as exc:
+        detail = "not valid JSON" if isinstance(exc, json.JSONDecodeError) else str(exc)
+        _emit(FAIL_TAG, label, f"Invalid sync state: {detail}",
+              "Restore a backup or inspect kanban-sync _kanban.md --recover --dry-run.")
         return
     schema = data.get("schema_version")
     if schema is None:
         _emit(WARN_TAG, label, "state file lacks schema_version",
-              "Run sync_to_github to regenerate, or delete .kanban.json.")
+              "Sync will record the schema version on its next save.")
     elif schema != EXPECTED_STATE_SCHEMA_VERSION:
         _emit(WARN_TAG, label,
               f"schema_version={schema} (expected {EXPECTED_STATE_SCHEMA_VERSION})",

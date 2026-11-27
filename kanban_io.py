@@ -54,8 +54,9 @@ _WINDOWS_REPLACE_RETRY_DELAY_SECONDS = 0.05
 # UUIDs (and future key formats) still read back; the canonical minted form
 # is uuid4().hex (32 lowercase hex chars). The length floor stops the reader
 # from latching onto arbitrary short junk in a lookalike comment.
+BOARD_KEY_PATTERN = r"[0-9A-Za-z-]{8,64}"
 _BOARD_KEY_RE = re.compile(
-    r"^\s*<!--\s*kanbanger:board-id:\s*([0-9A-Za-z-]{8,64})\s*-->\s*$"
+    rf"^\s*<!--\s*kanbanger:board-id:\s*({BOARD_KEY_PATTERN})\s*-->\s*$"
 )
 
 
@@ -369,6 +370,51 @@ def read_state(workspace: str) -> dict:
         }
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+class StateClaimConflict(ValueError):
+    """Multiple entries claim the same state key or remote item."""
+
+
+def load_sync_state(path: Path) -> dict:
+    """Read the sidecar with the same structural checks for sync and doctor."""
+    def unique_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise StateClaimConflict(f"duplicate JSON key {key!r}")
+            result[key] = value
+        return result
+
+    with path.open(encoding="utf-8") as source:
+        state = json.load(source, object_pairs_hook=unique_keys)
+    if not isinstance(state, dict) or not isinstance(state.get("tasks"), dict):
+        raise ValueError("expected an object with a 'tasks' object")
+    for key in ("board_key", "repo_node_id", "project_id"):
+        value = state.get(key)
+        if value is not None and not (isinstance(value, str) and value.strip()):
+            raise ValueError(f"invalid {key}")
+    board_key = state.get("board_key")
+    if board_key is not None and not re.fullmatch(BOARD_KEY_PATTERN, board_key):
+        raise ValueError("invalid board_key")
+    version = state.get("schema_version", 0)
+    if type(version) is not int or version < 0:
+        raise ValueError("invalid schema_version")
+    ids = set()
+    for title, task in state["tasks"].items():
+        if not title.strip() or not isinstance(task, dict):
+            raise ValueError(f"invalid task record {title!r}")
+        item_id = task.get("item_id")
+        if not isinstance(item_id, str) or not item_id.strip():
+            raise ValueError(f"invalid item_id for {title!r}")
+        if item_id in ids:
+            raise StateClaimConflict(f"multiple tasks claim item {item_id}")
+        ids.add(item_id)
+        if "status" not in task or not isinstance(task["status"], (str, type(None))):
+            raise ValueError(f"invalid status for {title!r}")
+        if "marked" in task and type(task["marked"]) is not bool:
+            raise ValueError(f"invalid marker flag for {title!r}")
+    return state
 
 
 def write_state(workspace: str, state: dict) -> None:

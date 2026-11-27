@@ -592,11 +592,20 @@ def test_read_mcp_project_env_handles_missing_and_unparseable(tmp_path: Path):
     assert kanban_doctor.read_mcp_project_env(tmp_path) == (True, None)
 
 
-def test_doctor_flags_corrupt_state_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """A `.kanban.json` that isn't valid JSON should produce a FAIL,
-    causing the doctor to exit 1."""
+@pytest.mark.parametrize(("contents", "detail"), [
+    (b"{", "not valid JSON"),
+    (b"\xff", "decode"),
+    (b"[]", "'tasks' object"),
+    (b'{"tasks":{"T":[]}}', "invalid task record"),
+    (b'{"tasks":{"T":{"item_id":null,"status":null}}}', "invalid item_id"),
+    (b'{"tasks":{}, "tasks":{}}', "duplicate JSON key"),
+    (b'{"schema_version":[], "tasks":{}}', "invalid schema_version"),
+    (b'{"board_key":"?", "tasks":{}}', "invalid board_key"),
+])
+def test_doctor_flags_corrupt_state_file(tmp_path, monkeypatch, contents, detail):
     (tmp_path / "_kanban.md").write_text(VALID_BOARD, encoding="utf-8")
-    (tmp_path / ".kanban.json").write_text("{ this is not valid json", encoding="utf-8")
+    path = tmp_path / ".kanban.json"
+    path.write_bytes(contents)
 
     monkeypatch.setenv("GITHUB_REPO", "owner/repo")
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_" + "A" * 36)
@@ -606,6 +615,7 @@ def test_doctor_flags_corrupt_state_file(tmp_path: Path, monkeypatch: pytest.Mon
         f"STDOUT:\n{result.stdout}\n"
         f"STDERR:\n{result.stderr}"
     )
-    assert "not valid JSON" in result.stdout, (
-        f"Expected doctor to mention 'not valid JSON', got:\n{result.stdout}"
-    )
+    assert detail in result.stdout
+    assert "--recover --dry-run" in result.stdout
+    assert "Traceback" not in result.stderr
+    assert path.read_bytes() == contents

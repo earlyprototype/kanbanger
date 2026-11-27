@@ -208,19 +208,15 @@ def test_mcp_preview_reports_invalid_utf8_board_as_read_failure(tmp_path, monkey
     assert payload["error_code"] == "read_failed"
 
 
-def test_state_load_backs_up_and_resets_invalid_structure(tmp_path, capsys):
-    """Real sync preserves corrupt state but starts clean, risking duplicates."""
+def test_state_load_refuses_corruption_before_real_sync(tmp_path):
     state_path = tmp_path / ".kanban.json"
     corrupt = b"[]"
     state_path.write_bytes(corrupt)
 
-    state = StateManager(str(tmp_path / "_kanban.md")).load()
-
-    assert state["tasks"] == {}
-    backups = list(tmp_path.glob(".kanban.json.corrupt-*"))
-    assert len(backups) == 1
-    assert backups[0].read_bytes() == corrupt
-    assert "treat the board as never-synced" in capsys.readouterr().err
+    with pytest.raises(ConfigurationError, match="Sync state is corrupt"):
+        StateManager(str(tmp_path / "_kanban.md")).load()
+    assert state_path.read_bytes() == corrupt
+    assert list(tmp_path.glob(".kanban.json.corrupt-*")) == []
 
 
 def test_mcp_preview_import_does_not_load_cwd_or_workspace_dotenv(
@@ -302,8 +298,8 @@ def test_mcp_preview_rejects_copied_board_state(tmp_path, monkeypatch):
     assert payload["error_code"] == "board_key_mismatch"
 
 
-def test_sync_executes_local_plan_without_remote_reconciliation(tmp_path, monkeypatch):
-    """A remote fetch must not decide what local state creates, moves, or archives."""
+def test_sync_migrates_legacy_ids_and_executes_local_plan(tmp_path, monkeypatch):
+    """Fetch both pages and mark the two known drafts before applying the plan."""
     board_path = tmp_path / "_kanban.md"
     board_path.write_text(
         "# Board\n\n## TODO\n* [ ] New\n\n## REVIEW\n* [ ] Moved\n",
@@ -346,10 +342,31 @@ def test_sync_executes_local_plan_without_remote_reconciliation(tmp_path, monkey
                     }]},
                 }]},
             }}})
+        if "items(first:" in query:
+            second = variables["cursor"] == "next"
+            title = "Removed" if second else "Moved"
+            return Response({"data": {"node": {"items": {
+                "pageInfo": {"hasNextPage": not second, "endCursor": "next"},
+                "nodes": [{
+                    "id": "PVTI_" + title.lower(), "isArchived": False,
+                    "content": {"__typename": "DraftIssue", "id": "draft-" + title,
+                                "title": title, "body": "Existing notes"},
+                    "fieldValueByName": None,
+                }, {
+                    "id": "unrelated-" + title, "isArchived": False,
+                    "content": {"__typename": "Issue"}, "fieldValueByName": None,
+                }],
+            }}}})
+        if "updateProjectV2DraftIssue" in query:
+            assert variables["id"] in ("draft-Moved", "draft-Removed")
+            assert variables["body"].startswith("Existing notes\n\n<!-- kanbanger:item:v1 ")
+            return Response({"data": {"updateProjectV2DraftIssue": {
+                "draftIssue": {"id": variables["id"]}
+            }}})
         if "addProjectV2DraftIssue" in query:
-            assert variables == {
-                "projectId": "PVT_project", "title": "New", "body": ""
-            }
+            assert variables["projectId"] == "PVT_project"
+            assert variables["title"] == "New"
+            assert variables["body"].startswith("<!-- kanbanger:item:v1 ")
             return Response({"data": {"addProjectV2DraftIssue": {
                 "projectItem": {"id": "PVTI_new"}
             }}})
@@ -362,7 +379,7 @@ def test_sync_executes_local_plan_without_remote_reconciliation(tmp_path, monkey
             return Response({"data": {"archiveProjectV2Item": {
                 "item": {"id": "PVTI_removed"}
             }}})
-        raise AssertionError("remote reconciliation is not part of the sync plan")
+        raise AssertionError(query)
 
     monkeypatch.setattr("requests.post", fake_post)
     Syncer(LocalBoard(str(board_path)), StateManager(str(board_path)), GitHubClient("token")).sync(
@@ -396,7 +413,11 @@ def test_created_item_is_durable_before_initial_status_failure(tmp_path):
             return "R_repo", "PVT_project", "PVTSSF_status", {"Todo": "opt_todo"}
 
         @staticmethod
-        def create_draft_issue(project_id, title):
+        def get_project_items(project_id):
+            return []
+
+        @staticmethod
+        def create_draft_issue(project_id, title, body):
             return "PVTI_new"
 
         @staticmethod
@@ -409,7 +430,7 @@ def test_created_item_is_durable_before_initial_status_failure(tmp_path):
         ).sync("owner/repo", 8)
 
     reloaded = StateManager(str(board_path)).load()["tasks"]
-    assert reloaded["New"] == {"item_id": "PVTI_new", "status": None}
+    assert reloaded["New"] == {"item_id": "PVTI_new", "status": None, "marked": True}
     assert build_sync_plan({"New": "Todo"}, reloaded)["operations"] == [{
         "action": "UPDATE",
         "title": "New",
@@ -437,6 +458,15 @@ def test_archive_failure_keeps_state_for_retry(tmp_path):
         @staticmethod
         def archive_item(project_id, item_id):
             raise GitHubAPIError("archive failed")
+
+        @staticmethod
+        def get_project_items(project_id):
+            return [dict(id="PVTI_removed", draft_id="draft", title="Removed", body="",
+                         archived=False, status="Done")]
+
+        @staticmethod
+        def mark_draft(draft_id, body):
+            assert draft_id == "draft"
 
     with pytest.raises(GitHubAPIError, match="archive failed"):
         Syncer(
