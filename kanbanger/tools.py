@@ -801,7 +801,8 @@ def register_tools(server: FastMCP):
         return json.dumps(tasks, indent=2)
     
     @server.tool()
-    def sync_to_github(dry_run: bool = False, recover: bool = False) -> str:
+    def sync_to_github(dry_run: bool = False, recover: bool = False,
+                       reviewed_item_ids: Optional[list[str]] = None) -> str:
         """
         Sync the kanban board to GitHub Projects V2.
         
@@ -810,6 +811,8 @@ def register_tools(server: FastMCP):
                 network access, or state writes. With recover, reads GitHub.
             recover: Inspect remote ownership and rebuild the sidecar. With dry_run,
                 return the recovery preview without writing.
+            reviewed_item_ids: When applying recovery, acknowledge the unmarked
+                Project item IDs you checked against the planned creates.
         
         Returns:
             Sync results or error message
@@ -837,6 +840,8 @@ def register_tools(server: FastMCP):
                 kanban_path=kanban_path,
             )
 
+        if reviewed_item_ids and (not recover or dry_run):
+            return _error(ERROR_CONFIGURATION, "Use reviewed_item_ids when applying recovery.")
         if dry_run and not recover:
             from sync_kanban import BoardReadError, ConfigurationError, local_sync_preview
 
@@ -869,6 +874,7 @@ def register_tools(server: FastMCP):
         cmd = [sys.executable, "-m", "sync_kanban", kanban_path]
         if recover:
             cmd.append("--recover")
+            cmd.extend(f"--reviewed-item={item_id}" for item_id in reviewed_item_ids or [])
             if dry_run:
                 cmd.append("--dry-run")
 

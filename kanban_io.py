@@ -440,6 +440,13 @@ def _validate_sync_state(state):
     board_key = state.get("board_key")
     if board_key is not None and not re.fullmatch(BOARD_KEY_PATTERN, board_key):
         raise ValueError("invalid board_key")
+    reviewed = state.get("reviewed_unmarked_ids", [])
+    if not isinstance(reviewed, list) or not all(
+        isinstance(item_id, str) and item_id.strip() for item_id in reviewed
+    ):
+        raise ValueError("invalid reviewed_unmarked_ids")
+    if reviewed and not (board_key and state.get("project_id")):
+        raise ValueError("reviewed item IDs require board and Project bindings")
     version = state.get("schema_version", 0)
     if type(version) is not int or version < 0:
         raise ValueError("invalid schema_version")

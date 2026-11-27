@@ -91,9 +91,11 @@ def test_recovery_round_trip(tmp_path, corrupt):
     preview = run(board, project, recover=True, preview=True)
     project.items.reverse()
     assert run(board, project, recover=True, preview=True) == preview
-    assert preview["plan"]["summary"] == {"create": 0, "update": 1, "archive": 0, "pending_archive": 1}
+    assert preview["plan"]["summary"] == {
+        "create": 0, "update": 0, "archive": 0, "pending_update": 1, "pending_archive": 1,
+    }
     assert [(op["action"], op["item_id"]) for op in preview["plan"]["operations"]] == [
-        ("UPDATE", first["id"]), ("PENDING_ARCHIVE", removed["id"]),
+        ("PENDING_UPDATE", first["id"]), ("PENDING_ARCHIVE", removed["id"]),
     ]
     if corrupt:
         assert path.read_bytes() == b"\xffbroken"
@@ -107,12 +109,19 @@ def test_recovery_round_trip(tmp_path, corrupt):
         assert backup.read_bytes() == b"\xffbroken"
     run(board, project)
     run(board, project)
-    assert project.writes == [("update", first["id"])]
+    assert project.writes == []
+    assert first["status"] == "Todo"
     assert not removed["archived"]
     assert json.loads(path.read_bytes())["tasks"]["Removed"]["item_id"] == removed["id"]
-    project.archive_item("project", removed["id"])  # Operator completes the pending archive.
+    # The operator completes both pending actions on GitHub.
+    project.update_item_status("project", first["id"], "status", "Done")
+    project.archive_item("project", removed["id"])
     run(board, project)
-    assert "Removed" not in json.loads(path.read_bytes())["tasks"]
+    tasks = json.loads(path.read_bytes())["tasks"]
+    assert "Removed" not in tasks
+    assert tasks["Café - review"]["status"] == "Done"
+    assert tasks["Café - review"]["recovered"]
+    assert project.writes == [("update", first["id"]), ("archive", removed["id"])]
     assert project.items[0] == unrelated
 
 
@@ -200,6 +209,59 @@ def test_renamed_converted_legacy_draft_requires_explicit_recovery(tmp_path, cor
     assert json.loads(state.read_bytes())["tasks"] == {}
 
 
+def test_stale_backup_requires_review_of_each_unmarked_item_before_create(tmp_path):
+    board = tmp_path / "_kanban.md"
+    board_at(board, "## TODO\n* [ ] Original\n")
+    path = tmp_path / ".kanban.json"
+    backup = b'{"tasks":{}}'
+    path.write_bytes(backup)
+    project = Project()
+    converted = project.create_draft_issue("project", "Original", "Legacy notes")
+    path.write_text(json.dumps({"tasks": {"Original": {"item_id": converted, "status": "Todo"}}}))
+    project.items[0].update(type="Issue", draft_id=None, title="Renamed after conversion")
+    project.writes.clear()
+
+    with pytest.raises(ConfigurationError, match=f"{converted}.*repository issue"):
+        run(board, project)
+    path.write_bytes(backup)
+    with pytest.raises(ConfigurationError, match="recover"):
+        run(board, project)
+    preview = run(board, project, recover=True, preview=True)
+    assert preview["unmarked"] == {converted: "Renamed after conversion"}
+    assert preview["owned"] == {} and preview["plan"]["summary"]["create"] == 1
+    assert path.read_bytes() == backup and project.writes == []
+
+    # Remove the local duplicate. A different ID arrives after the preview.
+    board_at(board, "## TODO\n* [ ] New work\n")
+    other = project.create_draft_issue("project", "Renamed after conversion")
+    sentinels = deepcopy(project.items)
+    project.writes.clear()
+    report = run(board, project, recover=True, reviewed_item_ids=[converted])
+    assert report["unreviewed_item_ids"] == [other]
+    assert json.loads(path.read_bytes())["reviewed_unmarked_ids"] == [converted]
+    with pytest.raises(ConfigurationError, match=other):
+        run(board, project)
+    assert project.writes == []
+    preview = run(board, project, recover=True, preview=True)
+    assert preview["unmarked"] == {converted: "Renamed after conversion", other: "Renamed after conversion"}
+    assert preview["unreviewed_item_ids"] == [other]
+    with pytest.raises(ConfigurationError, match="absent-id"):
+        run(board, project, recover=True, reviewed_item_ids=[converted, other, "absent-id"])
+    run(board, project, recover=True, reviewed_item_ids=[other])
+    assert json.loads(path.read_bytes())["reviewed_unmarked_ids"] == [converted, other]
+    run(board, project)
+    assert project.items[:2] == sentinels
+    assert project.writes == [("create", "item-2"), ("mark", "item-2"), ("update", "item-2")]
+
+    # Ordinary sync must check even an already reviewed sidecar on the next CREATE.
+    later = project.create_draft_issue("project", "Renamed after conversion")
+    project.writes.clear()
+    board_at(board, "## TODO\n* [ ] New work\n* [ ] Another task\n")
+    with pytest.raises(ConfigurationError, match=later):
+        run(board, project)
+    assert project.writes == []
+
+
 @pytest.mark.parametrize("notes", [
     "Look for the prefix `<!-- kanbanger:item:` in the body.",
     "<!-- kanbanger:item:... is the start of a marker in a draft.",
@@ -215,7 +277,7 @@ def test_documentation_issue_can_mention_the_marker_prefix(tmp_path, notes):
     preview = run(board, project, recover=True, preview=True)
     assert preview["plan"]["summary"] == {"create": 1, "update": 0, "archive": 0}
     assert preview["unmarked"] == {"item-0": "Documentation"}
-    run(board, project, recover=True)
+    run(board, project, recover=True, reviewed_item_ids=list(preview["unmarked"]))
     run(board, project)
     assert project.items[0] == sentinel
     assert project.writes == [("create", "item-1"), ("mark", "item-1"), ("update", "item-1")]
@@ -281,6 +343,8 @@ def test_restore_during_ordinary_write_preserves_bytes_and_reports_item(tmp_path
     else:
         path.write_bytes(b'{"tasks":{}}')
     legacy = project.create_draft_issue("project", "Legacy", "Existing draft")
+    if stage in ("create", "initial status"):
+        run(board, project, recover=True, reviewed_item_ids=[legacy])
     restored = json.dumps({"tasks": {"Legacy": {"item_id": legacy, "status": "Todo"}}},
                           indent=4).encode() + b"\n"
     methods = {"create": "create_draft_issue", "archive": "archive_item", "migration": "mark_draft"}
@@ -321,6 +385,26 @@ def test_recovery_checks_the_displaced_sidecar(tmp_path, monkeypatch):
         run(board, Project(), recover=True)
     assert path.read_bytes() == restored
     assert not list(tmp_path.glob(".kanban.json.*"))
+
+
+@pytest.mark.parametrize("column", ["REVIEW", "TODO"])
+def test_restore_during_marker_binding_stops_before_next_write(tmp_path, monkeypatch, column):
+    board = tmp_path / "_kanban.md"
+    board_at(board, f"## {column}\n* [ ] First\n* [ ] Second\n")
+    path = tmp_path / ".kanban.json"
+    project = Project()
+    mark = project.mark_draft
+    restored = b'{"tasks":{}}'
+
+    def restore_during_mark(*args):
+        mark(*args)
+        path.write_bytes(restored)
+
+    monkeypatch.setattr(project, "mark_draft", restore_during_mark)
+    with pytest.raises(ConfigurationError, match=r"after MARK of 'First' \(item-0\)"):
+        run(board, project)
+    assert project.writes == [("create", "item-0"), ("mark", "item-0")]
+    assert path.read_bytes() == restored
 
 
 @pytest.mark.parametrize(("initial", "recover"), [
@@ -575,6 +659,29 @@ def test_cli_online_preview_outputs_json_and_leaves_no_files(tmp_path):
     assert list(tmp_path.iterdir()) == [board]
 
 
+def test_cli_records_only_explicitly_reviewed_item_ids(tmp_path):
+    board = tmp_path / "_kanban.md"
+    board_at(board, "## TODO\n* [ ] Original\n")
+    code = (
+        "import sync_kanban as s; "
+        "s.GitHubClient.get_repo_project=lambda *a: ('R','P','F',{}); "
+        "s.GitHubClient.get_project_items=lambda *a: "
+        "[dict(id='issue-id', type='Issue', title='Renamed', body='', archived=False, status=None)]; "
+        "raise SystemExit(s.main())"
+    )
+    command = [sys.executable, "-c", code, str(board), "--repo", "owner/repo"]
+    options = dict(cwd=tmp_path, env=dict(os.environ, GITHUB_TOKEN="unused"),
+                   capture_output=True, text=True, timeout=30)
+    for flags in (["--dry-run"], ["--recover", "--dry-run"], []):
+        result = subprocess.run(command + flags + ["--reviewed-item", "issue-id"], **options)
+        assert result.returncode == 1 and "--recover" in result.stderr
+        assert not (tmp_path / ".kanban.json").exists()
+    result = subprocess.run(command + ["--recover", "--reviewed-item", "issue-id"], **options)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["unreviewed_item_ids"] == []
+    assert json.loads((tmp_path / ".kanban.json").read_bytes())["reviewed_unmarked_ids"] == ["issue-id"]
+
+
 @pytest.mark.parametrize("preview", [True, False])
 def test_mcp_returns_structured_remote_recovery_report(tmp_path, monkeypatch, preview):
     from kanbanger.tools import register_tools
@@ -590,7 +697,7 @@ def test_mcp_returns_structured_remote_recovery_report(tmp_path, monkeypatch, pr
     class Child:
         def __init__(self, cmd, **options):
             assert cmd == [sys.executable, "-m", "sync_kanban", str(board),
-                           "--recover"] + (["--dry-run"] if preview else [])
+                           "--recover"] + (["--dry-run"] if preview else ["--reviewed-item=id"])
             assert options["cwd"] == str(tmp_path)
             self.stdout = StringIO(json.dumps(report))
             self.stderr = StringIO()
@@ -601,7 +708,9 @@ def test_mcp_returns_structured_remote_recovery_report(tmp_path, monkeypatch, pr
     monkeypatch.setattr(subprocess, "Popen", Child)
     server = _StubMCPServer()
     register_tools(server)
-    result = json.loads(server.tools["sync_to_github"](dry_run=preview, recover=True))
+    sync = server.tools["sync_to_github"]
+    assert not json.loads(sync(dry_run=True, reviewed_item_ids=["id"]))["success"]
+    result = json.loads(sync(dry_run=preview, recover=True, reviewed_item_ids=None if preview else ["id"]))
     assert result == dict(report, success=True, mode="recovery_preview" if preview else "recovered")
 
 
@@ -722,14 +831,15 @@ def test_archived_bound_draft_blocks_replacement_by_original_task_key(tmp_path, 
     assert not list(tmp_path.glob(".kanban.json.*"))
 
 
-def test_conversion_after_ownership_read_cannot_archive_recovered_item(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("action", ["ARCHIVE", "UPDATE"])
+def test_conversion_after_ownership_read_leaves_recovered_item_pending(tmp_path, monkeypatch, capsys, action):
     board = tmp_path / "_kanban.md"
     path = tmp_path / ".kanban.json"
     board_at(board, "## TODO\n* [ ] Removed\n")
     project = Project()
     run(board, project)
     item, = project.items
-    board_at(board, "## TODO\n")
+    board_at(board, "## TODO\n" if action == "ARCHIVE" else "## DONE\n* [ ] Removed\n")
     path.unlink()
     run(board, project, recover=True)
     project.writes.clear()
@@ -743,9 +853,10 @@ def test_conversion_after_ownership_read_cannot_archive_recovered_item(tmp_path,
     run(board, project)
     assert item["type"] == "Issue" and not item["archived"]
     assert project.writes == []
-    assert json.loads(path.read_bytes())["tasks"]["Removed"]["item_id"] == item["id"]
+    record = json.loads(path.read_bytes())["tasks"]["Removed"]
+    assert record["item_id"] == item["id"] and record["status"] == item["status"] == "Todo"
     output = capsys.readouterr().out
-    assert "PENDING_ARCHIVE" in output and item["id"] in output
+    assert f"PENDING_{action}" in output and item["id"] in output
     with pytest.raises(ConfigurationError, match=f"{item['id']}.*repository issue"):
         run(board, project)
     assert project.writes == [] and "Removed" in json.loads(path.read_bytes())["tasks"]
@@ -800,6 +911,36 @@ def test_corrupt_status_recovered_from_item_with_matching_bound_marker(tmp_path)
     assert backup.read_bytes() == before
     assert json.loads(path.read_text())["tasks"]["Existing"]["status"] == "Todo"
     assert project.writes == []
+
+
+@pytest.mark.parametrize("claimed_title", ["Removed", "Different"])
+def test_corrupt_claim_for_archived_draft_requires_matching_marker(tmp_path, claimed_title):
+    board = tmp_path / "_kanban.md"
+    board_at(board, "## TODO\n* [ ] Removed\n")
+    project = Project()
+    run(board, project)
+    board_at(board, "## TODO\n")
+    item, = project.items
+    item.update(archived=True, title="Renamed")
+    path = tmp_path / ".kanban.json"
+    corrupt = json.dumps({"tasks": {claimed_title: {"item_id": item["id"], "status": 42}}}).encode()
+    path.write_bytes(corrupt)
+    project.writes.clear()
+    if claimed_title == "Removed":
+        preview = run(board, project, recover=True, preview=True)
+        assert preview["archived"] == {item["id"]: "Removed"}
+        assert preview["owned"] == {} and preview["plan"]["operations"] == []
+        assert path.read_bytes() == corrupt and not list(tmp_path.glob(".kanban.json.corrupt-*"))
+        report = run(board, project, recover=True)
+        assert Path(report["backup"]).read_bytes() == corrupt
+        run(board, project)
+        assert json.loads(path.read_bytes())["tasks"] == {}
+    else:
+        for preview in (True, False):
+            with pytest.raises(ConfigurationError, match="item-0.*Different"):
+                run(board, project, recover=True, preview=preview)
+        assert path.read_bytes() == corrupt and not list(tmp_path.glob(".kanban.json.corrupt-*"))
+    assert item["archived"] and project.writes == []
 
 
 def test_cr_only_legacy_board_keeps_present_task_and_line_endings(tmp_path):

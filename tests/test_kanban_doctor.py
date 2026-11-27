@@ -670,6 +670,9 @@ def test_read_mcp_project_env_handles_missing_and_unparseable(tmp_path: Path):
     (b'{"tasks":{"T":{"item_id":null,"status":null}}}', "invalid item_id"),
     (b'{"tasks":{}, "tasks":{}}', "duplicate JSON key"),
     (b'{"schema_version":[], "tasks":{}}', "invalid schema_version"),
+    (b'{"reviewed_unmarked_ids":"issue-id", "tasks":{}}', "invalid reviewed_unmarked_ids"),
+    (b'{"reviewed_unmarked_ids":[{}], "tasks":{}}', "invalid reviewed_unmarked_ids"),
+    (b'{"reviewed_unmarked_ids":["issue-id"], "tasks":{}}', "require board and Project"),
     (b'{"tasks":{"held":{"item_id":"draft","status":"Done","recovered":0}}}', "invalid recovered flag"),
     (b'{"board_key":"?", "tasks":{}}', "invalid board_key"),
 ])

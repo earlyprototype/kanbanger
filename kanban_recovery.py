@@ -72,6 +72,7 @@ def require_bound_marker(body: str, board_key: str, title: str, item_id: str):
 @dataclass
 class Inventory:
     tasks: dict = field(default_factory=dict)
+    archived: dict = field(default_factory=dict)
     legacy: dict = field(default_factory=dict)
     unmarked: dict = field(default_factory=dict)
 
@@ -81,7 +82,6 @@ def inspect_drafts(items, board_key, stored, local, *, recover):
     result = Inventory()
     by_id = {task["item_id"]: title for title, task in stored.items()}
     seen = set()
-    archived = {}
     conflicts = []
     for item in sorted(items, key=lambda row: row["id"]):
         item_id = item["id"]
@@ -129,7 +129,7 @@ def inspect_drafts(items, board_key, stored, local, *, recover):
             continue
 
         if item["archived"]:
-            archived[item_id] = title
+            result.archived[item_id] = title
             seen.add(item_id)
             continue
         existing = result.tasks.get(title) or stored.get(title)
@@ -141,18 +141,18 @@ def inspect_drafts(items, board_key, stored, local, *, recover):
         if bound_id is None:
             result.legacy[title] = item
         record = dict(stored.get(title, {}), item_id=item_id)
-        if recover or title not in stored:
+        if recover or record.get("recovered") or title not in stored:
             record["status"] = item["status"]
         if marker:
             record["marked"] = True
         if recover and (title not in stored or title not in local):
-            # Keep the hold across syncs, including status changes before removal.
+            # Status and archive writes on recovered items require an operator.
             record["recovered"] = True
         result.tasks[title] = record
 
     for item_id in sorted(by_id.keys() - seen):
         conflicts.append(f"{item_id}: cannot verify the recorded draft for {by_id[item_id]!r}")
-    for item_id, title in archived.items():
+    for item_id, title in result.archived.items():
         if title in local and title not in result.tasks:
             conflicts.append(f"{item_id}: archived draft for {title!r} is still on the board. "
                              "Restore the draft on GitHub or remove the local task before syncing")

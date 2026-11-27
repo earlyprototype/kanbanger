@@ -39,11 +39,14 @@ def test_recover_in_github_project(tmp_path):
 
     client.create_draft_issue = record_create
     try:
-        sync(recover=True)
+        # Every item in this snapshot predates the test board's first CREATE.
+        initial = sync(recover=True, preview=True)
+        sync(recover=True, reviewed_item_ids=initial["unreviewed_item_ids"])
         sync()
         owned, = created
         sentinel = record_create(project, title, "Independent sandbox draft")
         before = next(row for row in client.get_project_items(project) if row["id"] == sentinel)
+        board.write_text(header.replace("## TODO", "## DONE") + f"* [ ] {title}\n", encoding="utf-8")
         path = tmp_path / ".kanban.json"
         for corrupt in (False, True):
             path.unlink()
@@ -55,10 +58,15 @@ def test_recover_in_github_project(tmp_path):
             assert preview["owned"] == {title: owned}
             recovered["corrupt" if corrupt else "missing"] = preview["owned"][title]
             assert preview["unmarked"][sentinel] == title
+            assert [(op["action"], op["item_id"]) for op in preview["plan"]["operations"]] == [
+                ("PENDING_UPDATE", owned)
+            ]
             assert preview == sync(recover=True, preview=True)
             sync(recover=True)
             sync()
             assert created == {owned, sentinel}
+            current = next(row for row in client.get_project_items(project) if row["id"] == owned)
+            assert current["status"] == preview["plan"]["operations"][0]["from_status"]
         board.write_text(header, encoding="utf-8")
         path.unlink()
         plan = sync(recover=True, preview=True)["plan"]

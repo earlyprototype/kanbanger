@@ -120,14 +120,16 @@ def build_sync_plan(
             })
             summary["create"] += 1
         elif stored.get("status") != to_status:
+            action = "PENDING_UPDATE" if stored.get("recovered") else "UPDATE"
             operations.append({
-                "action": "UPDATE",
+                "action": action,
                 "title": title,
                 "from_status": stored.get("status"),
                 "to_status": to_status,
                 "item_id": stored.get("item_id"),
             })
-            summary["update"] += 1
+            key = action.lower()
+            summary[key] = summary.get(key, 0) + 1
 
     for title, stored in state_tasks.items():
         if title not in local_flat:
@@ -753,15 +755,18 @@ class Syncer:
         self.client = client
     
     def sync(self, repo: str, project_number: Optional[int] = None, *,
-             recover: bool = False, preview: bool = False):
+             recover: bool = False, preview: bool = False,
+             reviewed_item_ids: Optional[List[str]] = None):
         """Check ownership under the same workspace lock used for all writes."""
         if preview and not recover:
             raise ConfigurationError("Use --dry-run for a local preview")
+        if reviewed_item_ids and (not recover or preview):
+            raise ConfigurationError("Use --reviewed-item when applying --recover.")
         lock = nullcontext() if preview else kanban_lock(str(self.state.kanban_file.parent))
         with lock:
-            return self._sync(repo, project_number, recover, preview)
+            return self._sync(repo, project_number, recover, preview, reviewed_item_ids or [])
 
-    def _sync(self, repo, project_number, recover, preview):
+    def _sync(self, repo, project_number, recover, preview, reviewed_item_ids):
         parts = repo.split('/')
         if len(parts) != 2 or not all(parts):
             raise ConfigurationError("GITHUB_REPO must be 'owner/repo'")
@@ -798,7 +803,8 @@ class Syncer:
             raise ConfigurationError(f"Ownership conflict: {exc}") from exc
         self.state.verify_source()
         for item_id, title in sorted(damaged_claims.items()):
-            if inventory.tasks.get(title, {}).get("item_id") != item_id:
+            if (inventory.tasks.get(title, {}).get("item_id") != item_id
+                    and inventory.archived.get(item_id) != title):
                 raise ConfigurationError(f"Ownership conflict: cannot verify corrupt sidecar "
                                          f"claim {item_id} for {title!r}. Restore a backup.")
         missing_records = inventory.tasks.keys() - self.state.state["tasks"].keys()
@@ -808,6 +814,25 @@ class Syncer:
             )
 
         plan = build_sync_plan(local, inventory.tasks)
+        # An intact backup can predate an unmarked card. Only an operator can
+        # rule out a renamed legacy draft or converted issue before a CREATE.
+        unknown_ids = set(reviewed_item_ids) - inventory.unmarked.keys()
+        if unknown_ids:
+            raise ConfigurationError(
+                f"Reviewed IDs absent from the unmarked inventory: {', '.join(sorted(unknown_ids))}. "
+                "Inspect --recover --dry-run again."
+            )
+        reviewed = inventory.unmarked.keys() & self.state.state.get("reviewed_unmarked_ids", [])
+        reviewed.update(reviewed_item_ids)
+        unreviewed = sorted(inventory.unmarked.keys() - reviewed)
+        if not recover and plan["summary"]["create"] and unreviewed:
+            raise ConfigurationError(
+                f"Review unmarked Project items before CREATE: {', '.join(unreviewed)}. "
+                "Inspect --recover --dry-run, then apply --recover with --reviewed-item ID "
+                "for each item you have checked."
+            )
+        if reviewed or "reviewed_unmarked_ids" in self.state.state:
+            self.state.state["reviewed_unmarked_ids"] = sorted(reviewed)
         self.state.state["tasks"] = inventory.tasks
         marker_guidance = (
             "Sync and recovery require a board-id marker to apply changes. "
@@ -819,7 +844,9 @@ class Syncer:
             report = {
                 "state": state_kind, "board_key": board_key, "project_id": project_id,
                 "owned": {title: record["item_id"] for title, record in inventory.tasks.items()},
+                "archived": inventory.archived,
                 "unmarked": inventory.unmarked,
+                "unreviewed_item_ids": unreviewed,
                 "mark_on_next_sync": {title: item["id"] for title, item in inventory.legacy.items()},
                 "plan": plan,
             }
@@ -871,6 +898,7 @@ class Syncer:
                 self.state.save_after(action, title, item_id)
                 bound_marker = item_marker(board_key, title, item_id)
                 self.client.mark_draft(item_id, title, provisional, bound_marker)
+                self.state.save_after("MARK", title, item_id)
 
                 # Set initial status
                 if desired_status in status_options:
@@ -923,12 +951,14 @@ class Syncer:
                         f"not updated. Sync will retry next run.",
                         file=sys.stderr,
                     )
-            elif action in ("ARCHIVE", "PENDING_ARCHIVE"):
+            elif action in ("PENDING_UPDATE", "PENDING_ARCHIVE"):
                 self.client.verify_owned_draft(item_id, board_key, title)
-                if action == "PENDING_ARCHIVE":
-                    print(f"  [PENDING_ARCHIVE] {title} ({item_id}). Confirm this item is "
-                          "still the expected draft on GitHub before archiving it manually.")
-                    continue
+                instruction = (f"set its Status to {desired_status!r}"
+                               if action == "PENDING_UPDATE" else "archive it")
+                print(f"  [{action}] {title} ({item_id}). Confirm this is the expected draft "
+                      f"on GitHub before you {instruction} manually.")
+            elif action == "ARCHIVE":
+                self.client.verify_owned_draft(item_id, board_key, title)
                 print(f"  [ARCHIVE] {title}")
                 self.client.archive_item(project_id, item_id)
                 self.state.remove_task(title)
@@ -973,7 +1003,11 @@ def _main():
     
     parser.add_argument('--recover', action='store_true',
                         help='Rebuild sync state from marked drafts. Combine with --dry-run to preview.')
+    parser.add_argument('--reviewed-item', action='append', metavar='ID',
+                        help='With --recover, acknowledge an unmarked Project item by ID. Repeat for each item.')
     args = parser.parse_args()
+    if args.reviewed_item and (not args.recover or args.dry_run):
+        raise ConfigurationError("Use --reviewed-item when applying --recover.")
     
     # Convert project number from env var
     if args.project and isinstance(args.project, str):
@@ -1000,7 +1034,8 @@ def _main():
     client = GitHubClient(token)
     syncer = Syncer(LocalBoard(args.kanban_file), state, client)
     
-    result = syncer.sync(args.repo, args.project, recover=args.recover, preview=args.dry_run)
+    result = syncer.sync(args.repo, args.project, recover=args.recover, preview=args.dry_run,
+                         reviewed_item_ids=args.reviewed_item)
     if args.recover:
         print(json.dumps(result))
 
