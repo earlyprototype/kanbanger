@@ -15,28 +15,9 @@ if [ ! -f "_kanban.md" ]; then
     exit 1
 fi
 
-# Read the intent and timestamp from the same atomic checkpoint.
 state_status=missing
 if [ -f ".kanban.json" ]; then
-    state_python=python
-    command -v python >/dev/null 2>&1 || state_python=python3
-    state_status=$("$state_python" -I -c '
-import json
-import os
-import sys
-
-try:
-    with open(".kanban.json", encoding="utf-8") as state_file:
-        state = json.load(state_file)
-        state_mtime = os.fstat(state_file.fileno()).st_mtime_ns
-    if not isinstance(state, dict):
-        raise ValueError("expected a JSON object")
-    if "pending_create" in state:
-        sys.exit("Pending create. Run kanban-sync _kanban.md to reconcile it before committing.")
-    sys.stdout.write("stale" if os.stat("_kanban.md").st_mtime_ns > state_mtime else "current")
-except (OSError, ValueError) as exc:
-    sys.exit(f"Cannot check kanban sync state: {exc}")
-') || exit 1
+    state_status=$(kanban-sync --check-state _kanban.md) || exit 1
 fi
 
 if [ "$state_status" = missing ]; then

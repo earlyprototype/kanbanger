@@ -32,6 +32,7 @@ import os
 import shutil
 import subprocess
 import sys
+import sysconfig
 import time
 from pathlib import Path
 
@@ -97,9 +98,20 @@ def _run_hook_without_tty(cwd: Path) -> subprocess.CompletedProcess:
     # boundary; line endings + execute bits stay intact via
     # shutil.copy2.
     shutil.copy2(HOOK_PATH, cwd / "pre-commit")
+    # Git may see only the packaged CLI from a pipx install. Its launcher
+    # knows its interpreter even when neither python nor python3 is on PATH.
+    hook_bin = cwd / "hook-bin"
+    hook_bin.mkdir()
+    launcher = (
+        shutil.which("kanban-sync", path=sysconfig.get_path("scripts"))
+        or shutil.which("kanban-sync")
+    )
+    assert launcher, "Install the package to exercise its kanban-sync entry point"
+    shutil.copy2(launcher, hook_bin)
     return subprocess.run(
         [bash, "pre-commit"],
         cwd=str(cwd),
+        env={**os.environ, "PATH": str(hook_bin), "GITHUB_PROJECT_NUMBER": "unused"},
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
@@ -181,7 +193,7 @@ def test_non_tty_pending_create_blocks_commit_despite_newer_state(tmp_path):
     assert "Kanban check passed" not in output
 
 
-def test_hook_accepts_synced_task_named_pending_create(tmp_path):
+def test_hook_accepts_synced_task_named_pending_create_with_only_packaged_cli(tmp_path):
     board = tmp_path / "_kanban.md"
     board.write_text("## TODO\n* [ ] pending_create\n", encoding="utf-8")
     os.utime(board, (1, 1))

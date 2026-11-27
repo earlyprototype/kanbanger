@@ -3,11 +3,13 @@
 import json
 import os
 import socket
+import ssl
 import sys
 from contextlib import ExitStack
 
 import pytest
 import requests
+from urllib3.connection import CertificateError, HTTPSConnection
 from urllib3.exceptions import MaxRetryError, NewConnectionError, ProtocolError
 from urllib3.exceptions import ProxyError as Urllib3ProxyError
 
@@ -91,6 +93,40 @@ def test_retry_after_https_proxy_dns_failure(board, monkeypatch):
     retry_and_check_binding(board, project)
 
 
+@pytest.mark.parametrize("failure", [
+    ssl.SSLCertVerificationError(1, "certificate verify failed"),
+    CertificateError("hostname mismatch"),
+], ids=["untrusted-issuer", "hostname-mismatch"])
+def test_retry_after_tls_certificate_verification_failure(board, monkeypatch, failure):
+    project = DraftProject()
+    client = GitHubClient("offline")
+    monkeypatch.setattr(client, "get_repo_project", project.get_repo_project)
+    state_file = board.with_name(".kanban.json")
+    checkpoint = b'{"tasks": {}}\n'
+    state_file.write_bytes(checkpoint)
+    os.utime(state_file, (1, 1))
+    mtime = state_file.stat().st_mtime_ns
+
+    def fail_handshake(connection):
+        raise failure
+
+    def unexpected_send(connection, data):
+        pytest.fail("HTTP data sent before certificate verification")
+
+    monkeypatch.setattr(HTTPSConnection, "connect", fail_handshake)
+    monkeypatch.setattr(HTTPSConnection, "send", unexpected_send)
+    with requests.Session() as session:
+        session.trust_env = False
+        monkeypatch.setattr(requests, "post", session.post)
+        with pytest.raises(GitHubAPIError) as caught:
+            sync(board, client)
+
+    assert isinstance(caught.value.__cause__, requests.exceptions.SSLError)
+    assert state_file.read_bytes() == checkpoint
+    assert state_file.stat().st_mtime_ns == mtime
+    retry_and_check_binding(board, project)
+
+
 @pytest.mark.parametrize(("failure", "accepted"), [
     (requests.ConnectTimeout("timed out"), False),
     (requests.ConnectionError(MaxRetryError(None, "/", NewConnectionError(None, "refused"))), False),
@@ -99,8 +135,9 @@ def test_retry_after_https_proxy_dns_failure(board, monkeypatch):
     ), True),
     (requests.ReadTimeout("timed out"), True),
     (requests.ConnectionError("connection reset"), True),
+    (requests.exceptions.SSLError(ssl.SSLEOFError("unexpected EOF")), True),
 ], ids=["connect-timeout", "connection-refused", "proxy-reset",
-        "read-timeout", "connection-reset"])
+        "read-timeout", "connection-reset", "tls-eof"])
 def test_retry_after_create_transport_failure(board, monkeypatch, failure, accepted):
     project = DraftProject()
     client = GitHubClient("offline")
@@ -129,7 +166,7 @@ def test_retry_after_create_transport_failure(board, monkeypatch, failure, accep
     retry_and_check_binding(board, project)
 
 
-@pytest.mark.parametrize("status", [401, 403, 502])
+@pytest.mark.parametrize("status", [401, 403, 429, 502])
 def test_retry_after_create_http_error(board, monkeypatch, status):
     project = DraftProject()
     client = GitHubClient("offline")
@@ -151,6 +188,51 @@ def test_retry_after_create_http_error(board, monkeypatch, status):
     if status == 502:
         assert StateManager(str(board)).load()["pending_create"]["title"] == "New"
     else:
+        assert project.cards == {}
+        assert not board.with_name(".kanban.json").exists()
+    retry_and_check_binding(board, project)
+
+
+@pytest.mark.parametrize(("payload", "accepted"), [
+    ({"errors": [{"type": "RATE_LIMITED"}]}, False),
+    ({"errors": [{"extensions": {"code": "RATE_LIMITED"},
+                  "path": ["addProjectV2DraftIssue"]}],
+      "data": {"addProjectV2DraftIssue": None}}, False),
+    ({"errors": [{"type": "FORBIDDEN", "path": ["addProjectV2DraftIssue"]}],
+      "data": {"addProjectV2DraftIssue": None}}, False),
+    ({"errors": [{"type": "RATE_LIMITED"}],
+      "data": {"addProjectV2DraftIssue": {"projectItem": None}}}, True),
+    ({"errors": [{"type": "FORBIDDEN", "path": ["addProjectV2DraftIssue", "projectItem"]}],
+      "data": None}, True),
+    ({"errors": [{"type": "RATE_LIMITED"}, {"type": "INTERNAL"}],
+      "data": None}, True),
+    ({"errors": [{"message": "Rate limit exceeded"}], "data": None}, True),
+    ({"errors": [], "data": None}, True),
+], ids=["request-rate-limit", "mutation-rate-limit", "mutation-forbidden",
+        "partial-result", "nested-forbidden", "mixed-errors", "message-only",
+        "empty-errors"])
+def test_retry_after_graphql_create_error(board, monkeypatch, payload, accepted):
+    project = DraftProject()
+    client = GitHubClient("offline")
+    monkeypatch.setattr(client, "get_repo_project", project.get_repo_project)
+    response = requests.Response()
+    response.status_code = 200
+    response._content = json.dumps(payload).encode()
+
+    def failed_response(url, *, json, **kwargs):
+        assert "addProjectV2DraftIssue" in json["query"]
+        if accepted:
+            project._query(json["query"], json["variables"])
+        return response
+
+    monkeypatch.setattr(requests, "post", failed_response)
+    with pytest.raises(GitHubAPIError, match="GraphQL errors"):
+        sync(board, client)
+
+    if accepted:
+        assert StateManager(str(board)).load()["pending_create"]["title"] == "New"
+    else:
+        assert project.cards == {}
         assert not board.with_name(".kanban.json").exists()
     retry_and_check_binding(board, project)
 

@@ -8,6 +8,7 @@ import os
 import sys
 import json
 import shutil
+import ssl
 import argparse
 from contextlib import contextmanager
 from datetime import datetime
@@ -381,6 +382,23 @@ class StateManager:
                 f"Run sync to recover the pending create for {title!r} "
                 "before previewing further changes."
             )
+
+    def checkpoint_status(self) -> str:
+        """Read the intent and timestamp from the same checkpoint for pre-commit."""
+        try:
+            with self.state_file.open(encoding="utf-8") as checkpoint:
+                state = json.load(checkpoint)
+                mtime = os.fstat(checkpoint.fileno()).st_mtime_ns
+            if not isinstance(state, dict):
+                raise ValueError("expected a JSON object")
+            if "pending_create" in state:
+                raise ConfigurationError(
+                    f"Pending create. Run kanban-sync {self.kanban_file} "
+                    "to reconcile it before committing."
+                )
+            return "stale" if self.kanban_file.stat().st_mtime_ns > mtime else "current"
+        except (OSError, ValueError) as exc:
+            raise ConfigurationError(f"Cannot check kanban sync state: {exc}") from exc
     
     def save(self):
         """Acquire the board lock and save the current state atomically."""
@@ -519,7 +537,26 @@ class GitHubClient:
                 "requests not installed. Run: pip install requests"
             )
     
-    def _query(self, query: str, variables: Dict, *, allow_redirects: bool = True) -> Dict:
+    @staticmethod
+    def _create_rejected(payload: Dict) -> bool:
+        """Only a rejection of the request or mutation itself permits a new CREATE."""
+        mutation = "addProjectV2DraftIssue"
+        if payload.get("data") not in (None, {mutation: None}):
+            return False
+        for error in payload["errors"]:
+            code = error.get("type")
+            extensions = error.get("extensions")
+            if code is None and isinstance(extensions, dict):
+                code = extensions.get("code")
+            path = error.get("path")
+            if code == "RATE_LIMITED" and path in (None, [], [mutation]):
+                continue
+            if code == "FORBIDDEN" and path == [mutation]:
+                continue
+            return False
+        return True
+
+    def _query(self, query: str, variables: Dict, *, creating: bool = False) -> Dict:
         """Execute a GraphQL query."""
         try:
             response = self.requests.post(
@@ -527,10 +564,12 @@ class GitHubClient:
                 headers=self.headers,
                 json={"query": query, "variables": variables},
                 timeout=GITHUB_TIMEOUT_SEC,
-                allow_redirects=allow_redirects,
+                allow_redirects=not creating,
             )
         except self.requests.RequestException as exc:
+            from urllib3.connection import CertificateError
             from urllib3.exceptions import ConnectTimeoutError, MaxRetryError, ProxyError
+            from urllib3.exceptions import SSLError as Urllib3SSLError
 
             # A proxy can lose a response after forwarding CREATE. Only a
             # failure to establish the connection proves it was never sent.
@@ -539,9 +578,12 @@ class GitHubClient:
                 cause = cause.reason
             if isinstance(cause, ProxyError):
                 cause = cause.args[1] if len(cause.args) == 2 else None
-            if not allow_redirects and (
+            if isinstance(cause, Urllib3SSLError) and cause.args:
+                cause = cause.args[0]
+            setup_errors = (ConnectTimeoutError, ssl.SSLCertVerificationError, CertificateError)
+            if creating and (
                 isinstance(exc, self.requests.ConnectTimeout)
-                or isinstance(cause, ConnectTimeoutError)
+                or isinstance(cause, setup_errors)
             ):
                 raise GitHubRequestNotSent(f"GitHub API request failed: {exc}") from exc
             raise GitHubAPIError(f"GitHub API request failed: {exc}") from exc
@@ -551,7 +593,7 @@ class GitHubClient:
                 f"GitHub API returned status {response.status_code}: "
                 f"{response.text}"
             )
-            if not allow_redirects and response.status_code in (401, 403):
+            if creating and response.status_code in (401, 403, 429):
                 raise GitHubRequestNotExecuted(message)
             raise GitHubAPIError(message)
 
@@ -562,11 +604,16 @@ class GitHubClient:
         if not isinstance(data, dict):
             raise GitHubAPIError("GitHub API returned JSON that is not an object")
         if "errors" in data:
-            details = "\n".join(
-                f"  - {error.get('message', str(error))}"
-                for error in data["errors"]
-            )
-            raise GitHubAPIError(f"GraphQL errors:\n{details}")
+            errors = data["errors"]
+            if not errors or not isinstance(errors, list) or not all(
+                isinstance(error, dict) for error in errors
+            ):
+                raise GitHubAPIError("GitHub API returned malformed GraphQL errors")
+            details = "\n".join(f"  - {error.get('message', error)}" for error in errors)
+            message = f"GraphQL errors:\n{details}"
+            if creating and self._create_rejected(data):
+                raise GitHubRequestNotExecuted(message)
+            raise GitHubAPIError(message)
         
         return data
     
@@ -734,7 +781,7 @@ class GitHubClient:
         }
         
         # A timeout on a redirected POST says nothing about the original CREATE.
-        data = self._query(mutation, variables, allow_redirects=False)
+        data = self._query(mutation, variables, creating=True)
         return data["data"]["addProjectV2DraftIssue"]["projectItem"]["id"]
     
     def update_item_status(self, project_id: str, item_id: str, status_field_id: str, status_option_id: str):
@@ -943,8 +990,6 @@ class Syncer:
 
 
 def _main():
-    _load_cli_dotenv()
-
     # Fix console encoding for Windows; 'replace' (R11) so a stray byte cannot raise into the parent's pipe drain.
     if sys.platform == 'win32':
         import codecs
@@ -953,19 +998,30 @@ def _main():
     
     parser = argparse.ArgumentParser(description='Sync markdown kanban to GitHub Projects')
     parser.add_argument('kanban_file', help='Path to the markdown kanban file')
-    parser.add_argument('--repo', help='GitHub repo (owner/name)', default=os.environ.get('GITHUB_REPO') or None)
-    parser.add_argument('--project', type=int, help='GitHub Project number (optional if only one project linked)',
-                        default=os.environ.get('GITHUB_PROJECT_NUMBER') or None)
-    parser.add_argument('--dry-run', action='store_true', help='Print local sync plan without GitHub access')
+    parser.add_argument('--repo', help='GitHub repo (owner/name)')
+    parser.add_argument('--project', type=int, help='GitHub Project number (optional if only one project linked)')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--dry-run', action='store_true', help='Print local sync plan without GitHub access')
+    mode.add_argument('--check-state', action='store_true',
+                      help='Check the saved sync checkpoint for pre-commit without GitHub access')
     
     args = parser.parse_args()
     
-    # Convert project number from env var
-    if args.project and isinstance(args.project, str):
-        args.project = int(args.project) if args.project.isdigit() else None
-
     if not os.path.exists(args.kanban_file):
         raise ConfigurationError(f"File not found: {args.kanban_file}")
+
+    if args.check_state:
+        print(StateManager(args.kanban_file).checkpoint_status())
+        return
+
+    _load_cli_dotenv()
+    if args.repo is None:
+        args.repo = os.environ.get('GITHUB_REPO')
+    if args.project is None and os.environ.get('GITHUB_PROJECT_NUMBER'):
+        try:
+            args.project = int(os.environ['GITHUB_PROJECT_NUMBER'])
+        except ValueError:
+            parser.error("GITHUB_PROJECT_NUMBER must be an integer")
 
     # Initialize components
     board = LocalBoard(args.kanban_file)
