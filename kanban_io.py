@@ -30,6 +30,8 @@ from typing import Iterator, Optional, Tuple
 
 _LOCK_FILENAME = ".kanban.lock"
 _STATE_FILENAME = ".kanban.json"
+# Schema 2 uses Project-field provenance and item-specific review evidence.
+SCHEMA_VERSION = 2
 RECOVERY_SUFFIX = ".json.recovering"
 _KANBAN_FILENAME = "_kanban.md"
 _WINDOWS_REPLACE_ATTEMPTS = 5
@@ -445,7 +447,15 @@ def _validate_sync_state(state):
         isinstance(item_id, str) and item_id.strip() for item_id in reviewed
     ):
         raise ValueError("invalid reviewed_unmarked_ids")
-    if reviewed and not (board_key and state.get("project_id")):
+    evidence = state.get("reviewed_unmarked_items", {})
+    if not isinstance(evidence, dict) or not all(
+        item_id.strip() and isinstance(item, dict)
+        and item.get("type") in ("DraftIssue", "Issue", "PullRequest")
+        and isinstance(item.get("title"), str)
+        for item_id, item in evidence.items()
+    ):
+        raise ValueError("invalid reviewed_unmarked_items")
+    if (reviewed or evidence) and not (board_key and state.get("project_id")):
         raise ValueError("reviewed item IDs require board and Project bindings")
     titles = state.get("reviewed_create_titles", [])
     if not isinstance(titles, list) or not all(isinstance(title, str) and title.strip() for title in titles):

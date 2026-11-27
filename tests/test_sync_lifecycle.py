@@ -311,7 +311,8 @@ def test_sync_migrates_legacy_ids_and_executes_local_plan(tmp_path, monkeypatch)
     state = StateManager(str(board_path))
     state.state.update(board_key="a" * 32, project_id="PVT_project",
                        reviewed_create_titles=["New"],
-                       reviewed_unmarked_ids=["unrelated-Moved", "unrelated-Removed"])
+                       reviewed_unmarked_items={"unrelated-" + title: {"type": "Issue", "title": title}
+                                                for title in ("Moved", "Removed")})
     state.state["tasks"] = {
         "Moved": {"item_id": "PVTI_moved", "status": "InProgress"},
         "Removed": {"item_id": "PVTI_removed", "status": "Done"},
@@ -319,6 +320,7 @@ def test_sync_migrates_legacy_ids_and_executes_local_plan(tmp_path, monkeypatch)
     state.save()
     calls = []
     bodies = {"Moved": "Existing notes", "Removed": "Existing notes"}
+    provenance = {}
 
     class Response:
         status_code = 200
@@ -352,34 +354,35 @@ def test_sync_migrates_legacy_ids_and_executes_local_plan(tmp_path, monkeypatch)
         if "items(first:" in query:
             second = variables["cursor"] == "next"
             title = "Removed" if second else "Moved"
-            return Response({"data": {"node": {"items": {
+            return Response({"data": {"node": {"provenanceField": {"dataType": "TEXT", "id": "field"},
+                                               "items": {
                 "pageInfo": {"hasNextPage": not second, "endCursor": "next"},
                 "nodes": [{
                     "id": "PVTI_" + title.lower(), "isArchived": False,
                     "content": {"__typename": "DraftIssue", "id": "draft-" + title,
                                 "title": title, "body": bodies[title]},
                     "fieldValueByName": None,
+                    "provenance": provenance.get(title),
                 }, {
                     "id": "unrelated-" + title, "isArchived": False,
                     "content": {"__typename": "Issue", "id": "issue-" + title,
-                                "title": title, "body": ""}, "fieldValueByName": None,
+                                "title": title, "body": ""}, "fieldValueByName": None, "provenance": None,
                 }],
             }}}})
         if "node(id: $id)" in query:
             item_id = variables["id"]
             title = item_id.removeprefix("PVTI_").title()
             return Response({"data": {"node": {"id": item_id, "isArchived": False,
+                "provenance": provenance.get(title),
                 "content": {"__typename": "DraftIssue", "id": "draft-" + title,
                             "title": title, "body": bodies[title]}}}})
-        if "updateProjectV2DraftIssue" in query:
-            title = variables["id"].removeprefix("draft-")
-            assert title in ("Moved", "Removed", "New")
-            prefix = "" if title == "New" else "Existing notes\n\n"
-            assert variables["body"].startswith(prefix + "<!-- kanbanger:item:v2 ")
-            assert variables["body"].endswith(" PVTI_" + title.lower() + " -->")
-            bodies[title] = variables["body"]
-            return Response({"data": {"updateProjectV2DraftIssue": {
-                "draftIssue": {"id": variables["id"]}
+        if "updateProjectV2ItemFieldValue" in query and "marker" in variables:
+            title = variables["id"].removeprefix("PVTI_").title()
+            assert variables["field"] == "field"
+            assert variables["marker"].endswith(" PVTI_" + title.lower() + " -->")
+            provenance[title] = {"text": variables["marker"]}
+            return Response({"data": {"updateProjectV2ItemFieldValue": {
+                "projectV2Item": {"id": variables["id"]}
             }}})
         if "addProjectV2DraftIssue" in query:
             assert variables["projectId"] == "PVT_project"
@@ -411,7 +414,7 @@ def test_sync_migrates_legacy_ids_and_executes_local_plan(tmp_path, monkeypatch)
     assert "Removed" not in saved
     update_vars = [
         call["variables"] for call in calls
-        if "updateProjectV2ItemFieldValue" in call["query"]
+        if "optionId" in call["variables"]
     ]
     assert update_vars == [
         {"projectId": "PVT_project", "itemId": "PVTI_new", "fieldId": "PVTSSF_status", "optionId": "opt_todo"},
@@ -440,8 +443,8 @@ def test_created_item_is_durable_before_initial_status_failure(tmp_path):
             return "PVTI_new"
 
         @staticmethod
-        def mark_draft(item_id, title, expected, body):
-            assert item_id == "PVTI_new" and item_id in body
+        def mark_draft(project_id, item_id, title, expected, marker):
+            assert item_id == "PVTI_new" and item_id in marker
 
         @staticmethod
         def verify_owned_draft(item_id, board_key, title):
@@ -493,7 +496,7 @@ def test_archive_failure_keeps_state_for_retry(tmp_path):
                          archived=False, status="Done")]
 
         @staticmethod
-        def mark_draft(item_id, title, expected, body):
+        def mark_draft(project_id, item_id, title, expected, marker):
             assert item_id == "PVTI_removed"
 
         @staticmethod

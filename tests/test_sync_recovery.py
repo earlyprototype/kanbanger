@@ -22,6 +22,7 @@ class Project(GitHubClient):
     def __init__(self):
         self.items = []
         self.writes = []
+        self.provenance_field_id = None
 
     def get_repo_project(self, *args):
         return "repo", "project", "status", {"Todo": "Todo", "Done": "Done"}
@@ -45,15 +46,17 @@ class Project(GitHubClient):
         self.writes.append(("archive", item_id))
 
     def _query(self, document, variables):
-        if "updateProjectV2DraftIssue" in document:
-            draft_id = variables["id"]
-            item = next(item for item in self.items if item["draft_id"] == draft_id)
-            item["body"] = variables["body"]
+        if "createProjectV2Field" in document:
+            return {"data": {"createProjectV2Field": {"projectV2Field": {"id": "provenance-field"}}}}
+        if "updateProjectV2ItemFieldValue" in document:
+            item = next(item for item in self.items if item["id"] == variables["id"])
+            item["provenance"] = variables["marker"]
             self.writes.append(("mark", item["id"]))
-            return {"data": {"updateProjectV2DraftIssue": {"draftIssue": {"id": draft_id}}}}
+            return {"data": {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": item["id"]}}}}
         assert "node(id: $id)" in document
         item = next(item for item in self.items if item["id"] == variables["id"])
         return {"data": {"node": {"id": item["id"], "isArchived": item["archived"],
+                                  "provenance": {"text": item["provenance"]} if "provenance" in item else None,
                                   "content": {"__typename": item.get("type", "DraftIssue"), "id": item["draft_id"],
                                               "title": item["title"], "body": item["body"]}}}}
 
@@ -130,7 +133,7 @@ def test_duplicate_markers_refuse_the_entire_plan(tmp_path):
     board_at(board, "## TODO\n* [ ] One\n")
     project = Project()
     run(board, project)
-    project.create_draft_issue("project", "Different title", project.items[0]["body"])
+    project.create_draft_issue("project", "Different title", project.items[0]["provenance"])
     board_at(board, "## TODO\n* [ ] New\n")
     path = tmp_path / ".kanban.json"
     before = path.read_bytes()
@@ -237,9 +240,12 @@ def test_stale_backup_requires_review_of_each_unmarked_item_before_create(tmp_pa
     other = project.create_draft_issue("project", "Renamed after conversion")
     sentinels = deepcopy(project.items)
     project.writes.clear()
+    with pytest.raises(ConfigurationError, match="current preview"):
+        run(board, project, recover=True, reviewed_item_ids=[converted], review_token=token)
+    token = run(board, project, recover=True, preview=True)["review_token"]
     report = run(board, project, recover=True, reviewed_item_ids=[converted], review_token=token)
     assert report["unreviewed_item_ids"] == [other]
-    assert json.loads(path.read_bytes())["reviewed_unmarked_ids"] == [converted]
+    assert set(json.loads(path.read_bytes())["reviewed_unmarked_items"]) == {converted}
     with pytest.raises(ConfigurationError, match=other):
         run(board, project)
     assert project.writes == []
@@ -249,7 +255,7 @@ def test_stale_backup_requires_review_of_each_unmarked_item_before_create(tmp_pa
     with pytest.raises(ConfigurationError, match="absent-id"):
         run(board, project, recover=True, reviewed_item_ids=[converted, other, "absent-id"], review_token=token)
     run(board, project, recover=True, reviewed_item_ids=[other], review_token=token)
-    assert json.loads(path.read_bytes())["reviewed_unmarked_ids"] == [converted, other]
+    assert set(json.loads(path.read_bytes())["reviewed_unmarked_items"]) == {converted, other}
     run(board, project)
     assert project.items[:2] == sentinels
     assert project.writes == [("create", "item-2"), ("mark", "item-2"), ("update", "item-2")]
@@ -456,6 +462,7 @@ def test_conflicts_block_an_earlier_create(tmp_path, damage):
         item["body"] = item["body"].replace(KEY, "b" * 32)
     elif damage == "removed marker":
         item["body"] = ""
+        del item["provenance"]
     elif damage == "malformed marker":
         item["body"] = "<!-- kanbanger:item:v1 broken -->"
     elif damage == "quoted marker":
@@ -539,7 +546,8 @@ def test_v1_marker_needs_matching_sidecar_to_upgrade(tmp_path):
     path.write_text(json.dumps({"board_key": KEY, "tasks": {"Legacy": {"item_id": item_id, "status": "Todo",
                                                      "marked": True}}}))
     run(board, project)
-    assert project.items[0]["body"] == notes + f"<!-- kanbanger:item:v2 {KEY} 4c6567616379 {item_id} -->\n"
+    assert project.items[0]["body"] == old
+    assert project.items[0]["provenance"] == f"<!-- kanbanger:item:v2 {KEY} 4c6567616379 {item_id} -->"
     path.unlink()
     assert run(board, project, recover=True, preview=True)["owned"] == {"Legacy": item_id}
 
@@ -554,8 +562,8 @@ def test_recorded_legacy_notes_can_quote_a_marker_prefix(tmp_path):
     path.write_text(json.dumps({"board_key": KEY, "tasks": {"Legacy": {"item_id": item_id, "status": "Todo"}}}))
     assert run(board, project, recover=True, preview=True)["mark_on_next_sync"] == {"Legacy": item_id}
     run(board, project)
-    assert project.items[0]["body"] == notes + f"\n\n<!-- kanbanger:item:v2 {KEY} 4c6567616379 {item_id} -->"
-    project.items[0]["body"] = notes
+    assert project.items[0]["body"] == notes
+    assert project.items[0].pop("provenance") == f"<!-- kanbanger:item:v2 {KEY} 4c6567616379 {item_id} -->"
     before = path.read_bytes()
     project.writes.clear()
     with pytest.raises(ConfigurationError, match=f"{item_id}.*marker missing"):
@@ -605,7 +613,8 @@ def test_foreign_marker_with_same_title_is_independent(tmp_path):
     project = Project()
     run(board, project)
     foreign = project.items[0]
-    foreign["body"] = foreign["body"].replace(KEY, "b" * 32)
+    for field in ("body", "provenance"):
+        foreign[field] = foreign[field].replace(KEY, "b" * 32)
     (tmp_path / ".kanban.json").unlink()
     project.writes.clear()
     run(board, project)
@@ -668,7 +677,8 @@ def test_restoring_task_requires_fresh_review_for_renamed_issue(tmp_path, sync_r
     assert project.writes == []
 
 
-def test_old_item_only_review_cannot_authorize_a_create(tmp_path):
+@pytest.mark.parametrize("old_scope", [{}, {"reviewed_create_titles": ["Restored"]}])
+def test_old_item_only_review_cannot_authorize_a_create(tmp_path, old_scope):
     board = tmp_path / "_kanban.md"
     board_at(board, "## TODO\n* [ ] Restored\n")
     project = Project()
@@ -676,7 +686,7 @@ def test_old_item_only_review_cannot_authorize_a_create(tmp_path):
     project.items[0].update(type="Issue", draft_id=None)
     path = tmp_path / ".kanban.json"
     original = json.dumps({"board_key": KEY, "project_id": "project", "tasks": {},
-                           "reviewed_unmarked_ids": [converted]}).encode()
+                           "reviewed_unmarked_ids": [converted], **old_scope}).encode()
     path.write_bytes(original)
     project.writes.clear()
     preview = run(board, project, recover=True, preview=True)
@@ -745,7 +755,8 @@ def test_partial_legacy_confirmation_preserves_unbound_sidecar(tmp_path):
     assert project.items == before and project.writes == []
     run(board, project)
     assert project.writes == [("mark", active)]
-    assert project.items[0]["body"] == f"Notes\n\n<!-- kanbanger:item:v2 {KEY} 416374697665 {active} -->"
+    assert project.items[0]["body"] == "Notes"
+    assert project.items[0]["provenance"] == f"<!-- kanbanger:item:v2 {KEY} 416374697665 {active} -->"
     assert project.items[1] == before[1]
 
 
@@ -768,7 +779,7 @@ def test_incomplete_inventory_never_starts_a_mutation(tmp_path, monkeypatch, las
         page = last_page if variables["cursor"] else {
             "nodes": [], "pageInfo": {"hasNextPage": True, "endCursor": "again"}
         }
-        return {"data": {"node": {"items": page}}}
+        return {"data": {"node": {"provenanceField": None, "items": page}}}
 
     monkeypatch.setattr(client, "_query", query)
     with pytest.raises(GitHubAPIError, match="incomplete project inventory"):
@@ -821,7 +832,9 @@ def test_cli_records_only_explicitly_reviewed_item_ids(tmp_path):
     result = subprocess.run(command + ["--recover", "--reviewed-item", "issue-id", "--review-token", token], **options)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["unreviewed_item_ids"] == []
-    assert json.loads((tmp_path / ".kanban.json").read_bytes())["reviewed_unmarked_ids"] == ["issue-id"]
+    assert json.loads((tmp_path / ".kanban.json").read_bytes())["reviewed_unmarked_items"] == {
+        "issue-id": {"type": "Issue", "title": "Renamed"}
+    }
 
 
 @pytest.mark.parametrize("preview", [True, False])
@@ -919,7 +932,10 @@ def test_copy_of_archived_draft_is_never_recovered(tmp_path):
     assert not path.exists()
 
 
-def test_converted_issue_is_detected_with_lost_state(tmp_path, monkeypatch):
+@pytest.mark.parametrize("kind", ["Issue", "PullRequest"])
+@pytest.mark.parametrize("corrupt", [False, True])
+@pytest.mark.parametrize("marker_source", ["bound comment", "provisional comment", "field"])
+def test_converted_item_is_detected_with_lost_state(tmp_path, monkeypatch, kind, corrupt, marker_source):
     board = tmp_path / "_kanban.md"
     path = tmp_path / ".kanban.json"
     project = Project()
@@ -927,24 +943,172 @@ def test_converted_issue_is_detected_with_lost_state(tmp_path, monkeypatch):
     run(board, project)
     original, = project.items
     path.unlink()
+    if corrupt:
+        path.write_bytes(b"{")
     client = GitHubClient("unused")
     monkeypatch.setattr(client, "get_repo_project", project.get_repo_project)
 
     def query(document, variables):
         assert "mutation" not in document
-        content = {"__typename": "Issue"}
-        if "... on Issue" in document:
-            content.update(id="repo-issue", title="Renamed", body=original["body"])
+        content = {"__typename": kind}
+        if f"... on {kind} {{ id title body }}" in document:
+            body = {"bound comment": original["provenance"], "provisional comment": original["body"],
+                    "field": "Edited notes"}[marker_source]
+            content.update(id="content-id", title="Renamed", body=body)
+        provenance = {"text": original["provenance"]} if marker_source == "field" else None
         page = {"nodes": [{"id": original["id"], "isArchived": False,
-                           "content": content, "fieldValueByName": None}],
+                           "content": content, "fieldValueByName": None, "provenance": provenance}],
                 "pageInfo": {"hasNextPage": False}}
-        return {"data": {"node": {"items": page}}}
+        return {"data": {"node": {"provenanceField": {"id": "field", "dataType": "TEXT"}, "items": page}}}
 
     monkeypatch.setattr(client, "_query", query)
     for options in ({"recover": True, "preview": True}, {"recover": True}, {}):
-        with pytest.raises(ConfigurationError, match="(?i)item-0.*issue"):
+        message = "corrupt" if corrupt and not options else r"item-0.*(?:issue|pull request).*Converted"
+        with pytest.raises(ConfigurationError, match=message):
             run(board, client, **options)
-    assert not path.exists()
+    assert (path.read_bytes() if path.exists() else None) == (b"{" if corrupt else None)
+    assert not list(tmp_path.glob(".kanban.json.corrupt-*"))
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_unmarked_renamed_pull_request_requires_review(tmp_path, monkeypatch, corrupt):
+    board = tmp_path / "_kanban.md"
+    board_at(board, "## TODO\n* [ ] Original\n")
+    path = tmp_path / ".kanban.json"
+    if corrupt:
+        path.write_bytes(b"{")
+    client = GitHubClient("unused")
+    monkeypatch.setattr(client, "get_repo_project", Project().get_repo_project)
+
+    def query(document, variables):
+        assert "mutation" not in document
+        content = {"__typename": "PullRequest", "id": "PR", "title": "Renamed", "body": "notes"}
+        page = {"nodes": [{"id": "original-id", "content": content, "isArchived": False,
+                           "fieldValueByName": None, "provenance": None}],
+                "pageInfo": {"hasNextPage": False}}
+        return {"data": {"node": {"provenanceField": None, "items": page}}}
+
+    monkeypatch.setattr(client, "_query", query)
+    preview = run(board, client, recover=True, preview=True)
+    assert preview["unmarked_items"] == {"original-id": {"type": "PullRequest", "title": "Renamed"}}
+    assert preview["unreviewed_item_ids"] == ["original-id"]
+    with pytest.raises(ConfigurationError, match="recover"):
+        run(board, client)
+    run(board, client, recover=True)
+    with pytest.raises(ConfigurationError, match="original-id"):
+        run(board, client)
+
+
+@pytest.mark.parametrize("change", [{"type": "Issue"}, {"title": "Renamed"},
+                                    {"type": "PullRequest", "title": "Converted and renamed"}])
+@pytest.mark.parametrize("stage", ["apply", "sync", "before create"])
+def test_review_expires_when_item_evidence_changes(tmp_path, monkeypatch, change, stage):
+    board = tmp_path / "_kanban.md"
+    board_at(board, "## TODO\n* [ ] Original\n")
+    project = Project()
+    item_id = project.create_draft_issue("project", "Candidate", "notes")
+    project.writes.clear()
+    token = run(board, project, recover=True, preview=True)["review_token"]
+    apply = dict(recover=True, review_token=token, reviewed_item_ids=[item_id])
+    if stage != "apply":
+        run(board, project, **apply)
+    if stage == "before create":
+        inventory = project.get_project_items
+
+        def edit_after_snapshot(project_id):
+            snapshot = inventory(project_id)
+            project.items[0].update(change)
+            return snapshot
+
+        monkeypatch.setattr(project, "get_project_items", edit_after_snapshot)
+    else:
+        project.items[0].update(change)
+    path = tmp_path / ".kanban.json"
+    before = path.read_bytes() if path.exists() else None
+    with pytest.raises(ConfigurationError, match="current preview|item-0"):
+        run(board, project, **(apply if stage == "apply" else {}))
+    assert (path.read_bytes() if path.exists() else None) == before
+    assert project.writes == []
+    current = run(board, project, recover=True, preview=True)
+    assert current["review_token"] != token and current["unreviewed_item_ids"] == [item_id]
+
+
+@pytest.mark.parametrize("legacy", [True, False])
+def test_marker_binding_preserves_edit_after_final_draft_read(tmp_path, monkeypatch, legacy):
+    board = tmp_path / "_kanban.md"
+    board_at(board, "## TODO\n* [ ] Task\n")
+    project = Project()
+    path = tmp_path / ".kanban.json"
+    if legacy:
+        item_id = project.create_draft_issue("project", "Task", "Original notes")
+        path.write_text(json.dumps({"board_key": KEY, "tasks": {"Task": {"item_id": item_id,
+                                                                          "status": "Todo"}}}))
+    query = project._query
+
+    def edit_before_marker_write(document, variables):
+        if "mutation" in document:
+            project.items[0]["body"] = "Collaborator's latest notes"
+        return query(document, variables)
+
+    monkeypatch.setattr(project, "_query", edit_before_marker_write)
+    run(board, project)
+    assert project.items[0]["body"] == "Collaborator's latest notes"
+    path.unlink()
+    assert run(board, project, recover=True, preview=True)["owned"] == {"Task": "item-0"}
+
+
+def test_old_sidecar_upgrades_only_on_apply(tmp_path):
+    board = tmp_path / "_kanban.md"
+    board_at(board, "## TODO\n* [ ] Legacy\n")
+    project = Project()
+    item_id = project.create_draft_issue("project", "Legacy", "Shared notes")
+    path = tmp_path / ".kanban.json"
+    original = json.dumps({"schema_version": 1, "board_key": KEY, "tasks": {
+        "Legacy": {"item_id": item_id, "status": "Todo"}
+    }}).encode()
+    path.write_bytes(original)
+    run(board, project, recover=True, preview=True)
+    assert path.read_bytes() == original
+    run(board, project)
+    assert json.loads(path.read_bytes())["schema_version"] == 2
+    assert project.items[0]["body"] == "Shared notes"
+
+
+def test_provenance_write_lost_response_retries_without_second_create(tmp_path, monkeypatch):
+    board = tmp_path / "_kanban.md"
+    board_at(board, "## TODO\n* [ ] New\n")
+    project = Project()
+    query = project._query
+
+    def lose_marker_response(document, variables):
+        result = query(document, variables)
+        if "updateProjectV2ItemFieldValue" in document:
+            raise GitHubAPIError("lost field write response")
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(project, "_query", lose_marker_response)
+        with pytest.raises(GitHubAPIError, match="lost field write response"):
+            run(board, project)
+    run(board, project)
+    assert project.writes == [("create", "item-0"), ("mark", "item-0"), ("update", "item-0")]
+
+
+def test_unusable_provenance_field_blocks_create_before_mutation(tmp_path, monkeypatch):
+    board = tmp_path / "_kanban.md"
+    board_at(board, "## TODO\n* [ ] New\n")
+    client = GitHubClient("unused")
+    monkeypatch.setattr(client, "get_repo_project", Project().get_repo_project)
+
+    def query(document, variables):
+        assert "mutation" not in document
+        return {"data": {"node": {"provenanceField": {"dataType": "NUMBER", "id": "other-field"},
+                                  "items": {"nodes": [], "pageInfo": {"hasNextPage": False}}}}}
+
+    monkeypatch.setattr(client, "_query", query)
+    with pytest.raises(ConfigurationError, match="must be a text field"):
+        run(board, client)
+    assert not (tmp_path / ".kanban.json").exists()
 
 
 @pytest.mark.parametrize("corrupt", [False, True])
@@ -959,10 +1123,11 @@ def test_archived_bound_draft_blocks_replacement_by_original_task_key(tmp_path, 
 
     def query(document, variables):
         assert "archivedStates: [NOT_ARCHIVED, ARCHIVED]" in document
-        node = {"id": "archived-id", "isArchived": True, "fieldValueByName": None,
+        node = {"id": "archived-id", "isArchived": True, "fieldValueByName": None, "provenance": None,
                 "content": {"__typename": "DraftIssue", "id": "draft-id", "title": "Renamed",
                             "body": f"<!-- kanbanger:item:v2 {KEY} 5374696c6c206c6f63616c archived-id -->"}}
-        return {"data": {"node": {"items": {"nodes": [node], "pageInfo": {"hasNextPage": False}}}}}
+        return {"data": {"node": {"provenanceField": None,
+                                  "items": {"nodes": [node], "pageInfo": {"hasNextPage": False}}}}}
 
     monkeypatch.setattr(client, "_query", query)
     for options in ({"recover": True, "preview": True}, {"recover": True}, {}):
@@ -1241,6 +1406,8 @@ def test_changed_mutation_target_is_left_alone(tmp_path, monkeypatch, action, ch
         elif change == "archived":
             item["archived"] = True
         else:
+            if change in ("removed marker", "unbound marker"):
+                del item["provenance"]
             item["body"] = {
                 "removed marker": "Edited notes",
                 "other board": f"<!-- kanbanger:item:v2 {'b' * 32} 4f6e65 item-0 -->",

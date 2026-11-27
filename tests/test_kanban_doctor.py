@@ -38,7 +38,7 @@ VALID_BOARD = (
 )
 
 
-def _run_doctor(workspace: Path) -> subprocess.CompletedProcess:
+def _run_doctor(workspace: Path, *, encoding=None) -> subprocess.CompletedProcess:
     return subprocess.run(
         [
             sys.executable,
@@ -50,6 +50,7 @@ def _run_doctor(workspace: Path) -> subprocess.CompletedProcess:
         ],
         capture_output=True,
         text=True,
+        encoding=encoding,
     )
 
 
@@ -673,6 +674,8 @@ def test_read_mcp_project_env_handles_missing_and_unparseable(tmp_path: Path):
     (b'{"reviewed_unmarked_ids":"issue-id", "tasks":{}}', "invalid reviewed_unmarked_ids"),
     (b'{"reviewed_unmarked_ids":[{}], "tasks":{}}', "invalid reviewed_unmarked_ids"),
     (b'{"reviewed_unmarked_ids":["issue-id"], "tasks":{}}', "require board and Project"),
+    (b'{"reviewed_unmarked_items":{"id":{"type":"Issue"}}, "tasks":{}}', "invalid reviewed_unmarked_items"),
+    (b'{"reviewed_unmarked_items":{"id":{"title":"Task","type":"other"}}, "tasks":{}}', "invalid reviewed_unmarked_items"),
     (b'{"reviewed_create_titles":"unscoped", "tasks":{}}', "invalid reviewed_create_titles"),
     (b'{"reviewed_create_titles":[null], "tasks":{}}', "invalid reviewed_create_titles"),
     (b'{"tasks":{"held":{"item_id":"draft","status":"Done","recovered":0}}}', "invalid recovered flag"),
@@ -695,3 +698,17 @@ def test_doctor_flags_corrupt_state_file(tmp_path, monkeypatch, contents, detail
     assert "--recover --dry-run" in result.stdout
     assert "Traceback" not in result.stderr
     assert path.read_bytes() == contents
+
+
+@pytest.mark.parametrize(("encoding", "tasks", "escaped"), [
+    ("cp1252", {"任务": []}, r"\u4efb\u52a1"),
+    ("utf-8", {title: {"item_id": "\ud800", "status": None} for title in ("A", "B")}, r"\ud800"),
+])
+def test_doctor_escapes_unprintable_state_diagnostic(tmp_path, monkeypatch, encoding, tasks, escaped):
+    (tmp_path / "_kanban.md").write_text(VALID_BOARD, encoding="utf-8")
+    (tmp_path / ".kanban.json").write_text(json.dumps({"tasks": tasks}), encoding="ascii")
+    monkeypatch.setenv("PYTHONIOENCODING", encoding + ":strict")
+    result = _run_doctor(tmp_path, encoding=encoding)
+    assert result.returncode == 1
+    assert "[FAIL] .kanban.json schema" in result.stdout and escaped in result.stdout
+    assert "--recover --dry-run" in result.stdout and "Traceback" not in result.stderr

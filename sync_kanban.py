@@ -18,6 +18,7 @@ from typing import Dict, List, Optional, Tuple
 from kanban_io import (
     MalformedSyncState,
     RECOVERY_SUFFIX,
+    SCHEMA_VERSION,
     StateClaimConflict,
     atomic_write_json,
     extract_board_key,
@@ -28,7 +29,7 @@ from kanban_io import (
 )
 
 from kanban_recovery import (
-    OwnershipConflict, bind_marker, inspect_drafts, item_marker, require_bound_marker,
+    OwnershipConflict, inspect_drafts, item_marker, read_item_marker,
 )
 
 # Load environment variables from .env file if it exists.
@@ -57,13 +58,7 @@ def _load_cli_dotenv() -> None:
 # GitHub GraphQL endpoint
 GITHUB_API = "https://api.github.com/graphql"
 GITHUB_TIMEOUT_SEC = 30
-
-# R8: state file schema version. Persisted in .kanban.json so future
-# kanbanger versions can detect and migrate older state shapes.
-# v0 = pre-R8 (no field present); v1 = current. v0 and v1 are
-# structurally identical, so v0 files self-upgrade on next save.
-SCHEMA_VERSION = 1
-
+PROVENANCE_FIELD = "Kanbanger provenance"
 
 # E1: typed exceptions raised by the sync_kanban library so callers
 # (CLI entry-point, MCP subprocess wrapper, future direct importers)
@@ -421,6 +416,7 @@ class GitHubClient:
     def __init__(self, token: str):
         self.token = token
         self.status_field_name = "Status"
+        self.provenance_field_id = None
         self.headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json"
@@ -562,9 +558,12 @@ class GitHubClient:
     def get_project_items(self, project_id: str) -> List[Dict]:
         """Read every page before making ownership decisions."""
         query = """
-        query($projectId: ID!, $cursor: String, $status: String!) {
+        query($projectId: ID!, $cursor: String, $status: String!, $provenance: String!) {
             node(id: $projectId) {
                 ... on ProjectV2 {
+                    provenanceField: field(name: $provenance) {
+                        ... on ProjectV2Field { id dataType }
+                    }
                     items(first: 100, after: $cursor, archivedStates: [NOT_ARCHIVED, ARCHIVED]) {
                         pageInfo { hasNextPage endCursor }
                         nodes {
@@ -573,9 +572,13 @@ class GitHubClient:
                                 __typename
                                 ... on DraftIssue { id title body }
                                 ... on Issue { id title body }
+                                ... on PullRequest { id title body }
                             }
                             fieldValueByName(name: $status) {
                                 ... on ProjectV2ItemFieldSingleSelectValue { name }
+                            }
+                            provenance: fieldValueByName(name: $provenance) {
+                                ... on ProjectV2ItemFieldTextValue { text }
                             }
                         }
                     }
@@ -589,9 +592,18 @@ class GitHubClient:
         item_ids = set()
         while True:
             data = self._query(query, {"projectId": project_id, "cursor": cursor,
-                                       "status": self.status_field_name})
+                                       "status": self.status_field_name, "provenance": PROVENANCE_FIELD})
             try:
-                page = data["data"]["node"]["items"]
+                project = data["data"]["node"]
+                field = project["provenanceField"]
+                if field is not None and (not isinstance(field, dict) or field.get("dataType") != "TEXT"
+                                          or not isinstance(field.get("id"), str) or not field["id"]):
+                    raise ConfigurationError(f"Project field {PROVENANCE_FIELD!r} must be a text field")
+                field_id = field["id"] if field else None
+                if cursor is not None and field_id != self.provenance_field_id:
+                    raise ConfigurationError("Project provenance field changed during inventory. Retry sync.")
+                self.provenance_field_id = field_id
+                page = project["items"]
                 if not isinstance(page["nodes"], list):
                     raise ValueError("missing item list")
                 for node in page["nodes"]:
@@ -600,9 +612,7 @@ class GitHubClient:
                         raise ValueError("missing or repeated project item ID")
                     item_ids.add(item_id)
                     content = node["content"]
-                    if content and content["__typename"] == "PullRequest":
-                        continue
-                    if not content or content["__typename"] not in ("DraftIssue", "Issue"):
+                    if not content or content["__typename"] not in ("DraftIssue", "Issue", "PullRequest"):
                         raise ValueError("unreadable project item")
                     if not all(isinstance(content[key], str) for key in ("id", "body", "title")):
                         raise ValueError("unreadable draft")
@@ -615,6 +625,7 @@ class GitHubClient:
                     items.append(dict(id=item_id, type=kind,
                                       draft_id=content["id"] if kind == "DraftIssue" else None,
                                       title=content["title"], body=content["body"],
+                                      provenance=self._provenance_value(node),
                                       archived=node["isArchived"],
                                       status=None if status is None else status["name"]))
                 info = page["pageInfo"]
@@ -627,54 +638,83 @@ class GitHubClient:
             except (KeyError, TypeError, ValueError) as exc:
                 raise GitHubAPIError(f"GitHub API returned an incomplete project inventory: {exc}") from exc
 
+    @staticmethod
+    def _provenance_value(node):
+        value = node["provenance"]
+        if value is None:
+            return None
+        if not isinstance(value, dict) or not isinstance(value.get("text"), str):
+            raise GitHubAPIError("Unreadable Project provenance value")
+        return value["text"]
+
     def _get_active_draft(self, item_id: str) -> Dict:
         """Resolve a Project item to its current active draft content."""
         query = """
-        query($id: ID!) {
+        query($id: ID!, $provenance: String!) {
             node(id: $id) {
                 ... on ProjectV2Item {
                     id isArchived
+                    provenance: fieldValueByName(name: $provenance) {
+                        ... on ProjectV2ItemFieldTextValue { text }
+                    }
                     content { __typename ... on DraftIssue { id title body } }
                 }
             }
         }
         """
-        data = self._query(query, {"id": item_id})
+        data = self._query(query, {"id": item_id, "provenance": PROVENANCE_FIELD})
         item = (data.get("data") or {}).get("node") or {}
         draft = item.get("content") or {}
         if (item.get("id") != item_id or item.get("isArchived") is not False
                 or draft.get("__typename") != "DraftIssue" or not draft.get("id")
-                or not isinstance(draft.get("body"), str)):
+                or not isinstance(draft.get("body"), str) or "provenance" not in item):
             raise ConfigurationError(
                 f"Ownership conflict: {item_id} is no longer a readable active draft. "
                 "Inspect it and retry."
             )
-        return draft
+        return dict(draft, provenance=self._provenance_value(item))
 
     def verify_owned_draft(self, item_id: str, board_key: str, title: str):
         """Recheck ownership immediately before a status or archive mutation."""
         draft = self._get_active_draft(item_id)
         try:
-            require_bound_marker(draft["body"], board_key, title, item_id)
+            if read_item_marker(draft["body"], draft["provenance"]) != (board_key, title, item_id):
+                raise OwnershipConflict(f"expected bound ownership marker for {title!r}")
         except OwnershipConflict as exc:
             raise ConfigurationError(f"Ownership conflict: {item_id}: {exc}. Inspect it and retry.") from exc
 
-    def mark_draft(self, item_id: str, expected_title: str, expected_body: str, body: str):
-        """Recheck the item and its text immediately before replacing the body."""
+    def mark_draft(self, project_id: str, item_id: str, expected_title: str,
+                   expected_body: str, marker: str):
+        """Bind the Project item without replacing any editable draft text."""
         draft = self._get_active_draft(item_id)
-        if draft.get("title") != expected_title or draft["body"] != expected_body:
+        if (draft.get("title") != expected_title or draft["body"] != expected_body
+                or draft["provenance"] is not None):
             raise ConfigurationError(f"Draft {item_id} changed during sync. Inspect it and retry.")
-        draft_id = draft["id"]
+        if self.provenance_field_id is None:
+            create_field = """
+            mutation($project: ID!, $name: String!) {
+                createProjectV2Field(input: {projectId: $project, name: $name, dataType: TEXT}) {
+                    projectV2Field { ... on ProjectV2Field { id } }
+                }
+            }
+            """
+            data = self._query(create_field, {"project": project_id, "name": PROVENANCE_FIELD})
+            created = (data.get("data") or {}).get("createProjectV2Field") or {}
+            self.provenance_field_id = (created.get("projectV2Field") or {}).get("id")
+            if not self.provenance_field_id:
+                raise GitHubAPIError("GitHub API returned no provenance field ID")
         mutation = """
-        mutation($id: ID!, $body: String!) {
-            updateProjectV2DraftIssue(input: {draftIssueId: $id, body: $body}) {
-                draftIssue { id }
+        mutation($project: ID!, $id: ID!, $field: ID!, $marker: String!) {
+            updateProjectV2ItemFieldValue(input: {projectId: $project, itemId: $id,
+                    fieldId: $field, value: {text: $marker}}) {
+                projectV2Item { id }
             }
         }
         """
-        data = self._query(mutation, {"id": draft_id, "body": body})
-        updated = (data.get("data") or {}).get("updateProjectV2DraftIssue") or {}
-        if (updated.get("draftIssue") or {}).get("id") != draft_id:
+        data = self._query(mutation, {"project": project_id, "id": item_id,
+                                      "field": self.provenance_field_id, "marker": marker})
+        updated = (data.get("data") or {}).get("updateProjectV2ItemFieldValue") or {}
+        if (updated.get("projectV2Item") or {}).get("id") != item_id:
             raise GitHubAPIError("GitHub API returned no confirmation of the draft marker")
 
     def create_draft_issue(self, project_id: str, title: str, body: str = "") -> str:
@@ -801,14 +841,7 @@ class Syncer:
             if self.state.state.get(key) not in (None, expected):
                 raise ConfigurationError(f"Ownership conflict: sidecar {key} does not match {expected}")
         self.state.set_project_info(repo_id, project_id)
-        try:
-            inventory = inspect_drafts(
-                self.client.get_project_items(project_id), board_key,
-                self.state.state["tasks"], local, recover=recover,
-                sidecar_bound=self.state.state.get("board_key") is not None,
-            )
-        except OwnershipConflict as exc:
-            raise ConfigurationError(f"Ownership conflict: {exc}") from exc
+        inventory = self._inventory(project_id, local, recover)
         self.state.verify_source()
         for item_id, title in sorted(damaged_claims.items()):
             if (inventory.tasks.get(title, {}).get("item_id") != item_id
@@ -840,35 +873,39 @@ class Syncer:
             inventory.archived.pop(item_id, None)
         plan = build_sync_plan(local, inventory.tasks)
         create_titles = sorted(op["title"] for op in plan["operations"] if op["action"] == "CREATE")
-        scope = [board_key, project_id, create_titles, inventory.pending_legacy]
+        scope = [board_key, project_id, create_titles, inventory.pending_legacy,
+                 inventory.unmarked, inventory.legacy_evidence]
         current_token = hashlib.sha256(json.dumps(scope, sort_keys=True).encode("utf-8")).hexdigest()
         if review_token is not None and review_token != current_token:
             raise ConfigurationError("Review token does not match the current preview. "
                                      "Inspect --recover --dry-run again.")
         # An intact backup can predate an unmarked card. Only an operator can
-        # rule out a renamed legacy draft or converted issue before a CREATE.
+        # rule out a renamed or converted legacy draft before a CREATE.
         unknown_ids = set(reviewed_item_ids) - inventory.unmarked.keys()
         if unknown_ids:
             raise ConfigurationError(
                 f"Reviewed IDs absent from the unmarked inventory: {', '.join(sorted(unknown_ids))}. "
                 "Inspect --recover --dry-run again."
             )
-        reviewed = set(reviewed_item_ids)
+        reviewed = {item_id: inventory.unmarked[item_id] for item_id in reviewed_item_ids}
         if self.state.state.get("reviewed_create_titles") == create_titles:
-            saved_ids = self.state.state.get("reviewed_unmarked_ids", [])
-            reviewed.update(inventory.unmarked.keys() & saved_ids)
-        unreviewed = sorted(inventory.unmarked.keys() - reviewed)
+            saved = self.state.state.get("reviewed_unmarked_items", {})
+            reviewed.update((item_id, item) for item_id, item in inventory.unmarked.items()
+                            if saved.get(item_id) == item)
+        unreviewed = sorted(inventory.unmarked.keys() - reviewed.keys())
         if not recover and plan["summary"]["create"] and unreviewed:
             raise ConfigurationError(
                 f"Review unmarked Project items before CREATE: {', '.join(unreviewed)}. "
                 "Inspect --recover --dry-run, then apply --recover with its --review-token "
                 "and --reviewed-item ID for each item you have checked."
             )
+        # Older acknowledgments contain IDs alone and cannot authorize a CREATE.
+        self.state.state.pop("reviewed_unmarked_ids", None)
         if reviewed:
-            self.state.state["reviewed_unmarked_ids"] = sorted(reviewed)
+            self.state.state["reviewed_unmarked_items"] = reviewed
             self.state.state["reviewed_create_titles"] = create_titles
         else:
-            self.state.state.pop("reviewed_unmarked_ids", None)
+            self.state.state.pop("reviewed_unmarked_items", None)
             self.state.state.pop("reviewed_create_titles", None)
         self.state.state["tasks"] = inventory.tasks
         marker_guidance = (
@@ -882,9 +919,11 @@ class Syncer:
                 "state": state_kind, "board_key": board_key, "project_id": project_id,
                 "owned": {title: record["item_id"] for title, record in inventory.tasks.items()},
                 "archived": inventory.archived,
-                "unmarked": inventory.unmarked,
+                "unmarked": {item_id: item["title"] for item_id, item in inventory.unmarked.items()},
+                "unmarked_items": inventory.unmarked,
                 "unreviewed_item_ids": unreviewed,
                 "pending_legacy_claims": pending,
+                "pending_legacy_items": {item_id: inventory.legacy_evidence[item_id] for item_id in pending},
                 "review_token": current_token,
                 "mark_on_next_sync": {title: item["id"] for title, item in inventory.legacy.items()},
                 "plan": plan,
@@ -900,6 +939,7 @@ class Syncer:
         if board_key is None:
             raise ConfigurationError(marker_guidance)
         self.state.state["board_key"] = board_key
+        self.state.state["schema_version"] = SCHEMA_VERSION
         if recover:
             backup = self.state.save_unlocked(corrupt=state_kind == "corrupt")
             if backup is not None:
@@ -908,14 +948,36 @@ class Syncer:
 
         # A valid legacy sidecar supplies the item IDs for this migration.
         for title, item in inventory.legacy.items():
-            body = bind_marker(item["body"], board_key, title, item["id"])
-            self.client.mark_draft(item["id"], item["title"], item["body"], body)
+            marker = item_marker(board_key, title, item["id"])
+            self.client.mark_draft(project_id, item["id"], item["title"], item["body"], marker)
             self.state.state["tasks"][title]["marked"] = True
             self.state.save_after("MARK", title, item["id"])
 
-        self._apply_plan(plan, project_id, field_id, options, board_key)
+        self._apply_plan(plan, project_id, field_id, options, board_key, local, reviewed)
 
-    def _apply_plan(self, plan, project_id, status_field_id, status_options, board_key):
+    def _inventory(self, project_id, local, recover=False):
+        try:
+            return inspect_drafts(
+                self.client.get_project_items(project_id), self.board.board_key,
+                self.state.state["tasks"], local, recover=recover,
+                sidecar_bound=self.state.state.get("board_key") is not None,
+            )
+        except OwnershipConflict as exc:
+            raise ConfigurationError(f"Ownership conflict: {exc}") from exc
+
+    def _verify_create(self, project_id, title, local, reviewed):
+        inventory = self._inventory(project_id, local)
+        unreviewed = sorted(item_id for item_id, item in inventory.unmarked.items()
+                            if reviewed.get(item_id) != item)
+        if unreviewed:
+            raise ConfigurationError(f"Review unmarked items {', '.join(unreviewed)} before CREATE. "
+                                     "Inspect --recover --dry-run again.")
+        if title in inventory.tasks or inventory.tasks.keys() - self.state.state["tasks"].keys():
+            raise ConfigurationError("Ownership changed before CREATE. Inspect --recover --dry-run again.")
+        self.board.verify_source()
+        self.state.verify_source()
+
+    def _apply_plan(self, plan, project_id, status_field_id, status_options, board_key, local, reviewed):
         for operation in plan["operations"]:
             action = operation["action"]
             title = operation["title"]
@@ -924,6 +986,7 @@ class Syncer:
 
             if action == "CREATE":
                 # New task - create it
+                self._verify_create(project_id, title, local, reviewed)
                 print(f"  [CREATE] {title} => {desired_status}")
                 provisional = item_marker(board_key, title)
                 item_id = self.client.create_draft_issue(project_id, title, provisional)
@@ -937,11 +1000,11 @@ class Syncer:
                 self.state.update_task(title, item_id, None)
                 # This CREATE consumes the reviewed plan. A retry with a
                 # different set of remaining creates needs its own review.
-                self.state.state.pop("reviewed_unmarked_ids", None)
+                self.state.state.pop("reviewed_unmarked_items", None)
                 self.state.state.pop("reviewed_create_titles", None)
                 self.state.save_after(action, title, item_id)
                 bound_marker = item_marker(board_key, title, item_id)
-                self.client.mark_draft(item_id, title, provisional, bound_marker)
+                self.client.mark_draft(project_id, item_id, title, provisional, bound_marker)
                 self.state.save_after("MARK", title, item_id)
 
                 # Set initial status

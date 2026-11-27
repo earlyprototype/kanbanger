@@ -33,15 +33,6 @@ def item_marker(board_key: str, title: str, item_id: str | None = None) -> str:
     return f"{_PREFIX}v2 {key} {item_id} -->"
 
 
-def bind_marker(body: str, board_key: str, title: str, item_id: str) -> str:
-    """Append a bound marker or replace the verified provisional footer."""
-    marker = item_marker(board_key, title, item_id)
-    provisional = item_marker(board_key, title)
-    if provisional in body:
-        return body.replace(provisional, marker, 1)
-    return body + "\n\n" + marker if body else marker
-
-
 def _read_marker(body: str):
     if _PREFIX not in body:
         return None
@@ -63,10 +54,18 @@ def _read_marker(body: str):
     raise OwnershipConflict("invalid or multiple ownership markers")
 
 
-def require_bound_marker(body: str, board_key: str, title: str, item_id: str):
-    """Verify the current body still identifies this board, task and Project item."""
-    if _read_marker(body) != (board_key, title, item_id):
-        raise OwnershipConflict(f"expected bound ownership marker for {title!r}")
+def read_item_marker(body, provenance):
+    """Reconcile legacy body comments with the dedicated Project text field."""
+    comment = _read_marker(body)
+    if provenance is None:
+        return comment
+    bound = _read_marker(provenance)
+    if not bound or bound[2] is None or provenance != item_marker(*bound):
+        raise OwnershipConflict("invalid Project provenance field")
+    owner, title, _ = bound
+    if comment and comment not in (bound, (owner, title, None)):
+        raise OwnershipConflict("Project provenance and draft comment disagree")
+    return bound
 
 
 @dataclass
@@ -75,6 +74,7 @@ class Inventory:
     archived: dict = field(default_factory=dict)
     legacy: dict = field(default_factory=dict)
     pending_legacy: dict = field(default_factory=dict)
+    legacy_evidence: dict = field(default_factory=dict)
     unmarked: dict = field(default_factory=dict)
 
 
@@ -87,8 +87,10 @@ def inspect_drafts(items, board_key, stored, local, *, recover, sidecar_bound):
     for item in sorted(items, key=lambda row: row["id"]):
         item_id = item["id"]
         stored_title = by_id.get(item_id)
+        kind = item.get("type", "DraftIssue")
+        converted = {"Issue": "repository issue", "PullRequest": "pull request"}.get(kind)
         try:
-            marker = _read_marker(item["body"])
+            marker = read_item_marker(item["body"], item.get("provenance"))
         except OwnershipConflict as exc:
             conflicts.append(f"{item_id}: {exc}")
             continue
@@ -96,7 +98,8 @@ def inspect_drafts(items, board_key, stored, local, *, recover, sidecar_bound):
         if marker:
             owner, title, bound_id = marker
             if bound_id is not None and bound_id != item_id:
-                conflicts.append(f"marker for {bound_id} was copied to {item_id}")
+                conflicts.append(f"marker for {bound_id} found on {item_id} "
+                                 f"({converted or 'draft'} {item['title']!r}). Verify the original item.")
                 continue
             if board_key is None:
                 conflicts.append(f"{item_id}: restore the board-id marker before syncing")
@@ -108,8 +111,8 @@ def inspect_drafts(items, board_key, stored, local, *, recover, sidecar_bound):
                     conflicts.append(f"{item_id}: unbound marker for another board. "
                                      "Verify the original item ID with that board's sidecar.")
                 continue
-            if item.get("type") == "Issue":
-                conflicts.append(f"{item_id}: repository issue carries the marker for {title!r}. "
+            if converted:
+                conflicts.append(f"{item_id}: {converted} {item['title']!r} carries the marker for {title!r}. "
                                  "Resolve the converted draft before syncing")
                 continue
             if stored_title is not None and title != stored_title:
@@ -120,20 +123,20 @@ def inspect_drafts(items, board_key, stored, local, *, recover, sidecar_bound):
                                  "sidecar with the confirmed item ID or resolve it on GitHub")
                 continue
         elif stored_title is not None:
-            if item.get("type") == "Issue":
-                conflicts.append(f"{item_id}: recorded draft is now a repository issue")
+            if converted:
+                conflicts.append(f"{item_id}: recorded draft is now a {converted}")
                 continue
             title = stored_title
             if stored[title].get("marked") or item["title"] != title:
                 conflicts.append(f"{item_id}: ownership marker missing or legacy title changed")
                 continue
         else:
-            # An issue can be a converted, renamed pre-marker draft.
-            result.unmarked[item_id] = item["title"]
+            result.unmarked[item_id] = {"type": kind, "title": item["title"]}
             continue
 
         if bound_id is None and not sidecar_bound:
             result.pending_legacy[item_id] = title
+            result.legacy_evidence[item_id] = {"type": kind, "title": item["title"]}
         if item["archived"]:
             result.archived[item_id] = title
             seen.add(item_id)
@@ -164,7 +167,8 @@ def inspect_drafts(items, board_key, stored, local, *, recover, sidecar_bound):
         if title in local and title not in result.tasks:
             conflicts.append(f"{item_id}: archived draft for {title!r} is still on the board. "
                              "Restore the draft on GitHub or remove the local task before syncing")
-    for item_id, title in result.unmarked.items():
+    for item_id, evidence in result.unmarked.items():
+        title = evidence["title"]
         if title in local and title not in result.tasks:
             conflicts.append(f"{item_id}: unmarked Project item matches {title!r}. Restore the "
                              "original sidecar or resolve the title collision on GitHub")

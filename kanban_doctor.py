@@ -67,6 +67,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
+from kanban_io import SCHEMA_VERSION as EXPECTED_STATE_SCHEMA_VERSION
+
 try:
     from dotenv import load_dotenv
 except ImportError:
@@ -74,7 +76,6 @@ except ImportError:
 
 GITHUB_API = "https://api.github.com/graphql"
 CLASSIC_PAT_RE = re.compile(r"^ghp_[A-Za-z0-9]{36}$")
-EXPECTED_STATE_SCHEMA_VERSION = 1
 # Dist names this project has shipped under. CANONICAL_DIST is the live
 # PyPI name (renamed from kanbanger-partymix for the 3.0 PyPI release,
 # issue #22). Anything in LEGACY_KANBANGER_DISTS is a stale install from
@@ -184,6 +185,14 @@ def _result_lines(status, name, detail, remediation, tags):
     return lines
 
 
+def _print_line(line):
+    """Escape characters the current output stream cannot represent."""
+    encoding = getattr(sys.stdout, "encoding", None)
+    if encoding:
+        line = line.encode(encoding, errors="backslashreplace").decode(encoding)
+    print(line)
+
+
 class _RunContext:
     """Mutable collector for one run_doctor() invocation.
 
@@ -204,7 +213,7 @@ class _RunContext:
     def line(self, plain: str, colored: Optional[str] = None) -> None:
         self.body_lines.append(plain)
         if self.echo:
-            print(colored if colored is not None else plain)
+            _print_line(colored if colored is not None else plain)
 
     def set_section(self, name: str) -> None:
         self.section = name
@@ -254,7 +263,7 @@ def _emit(tag, label, message, fix=None):
         ctx.add(status, label, message, fix)
         return
     for line in _result_lines(status, label, message, fix, {status: tag}):
-        print(line)
+        _print_line(line)
     _results[status.lower()] += 1
 
 
@@ -829,7 +838,10 @@ def check_state_file(workspace):
     if schema is None:
         _emit(WARN_TAG, label, "state file lacks schema_version",
               "Sync will record the schema version on its next save.")
-    elif schema != EXPECTED_STATE_SCHEMA_VERSION:
+    elif schema < EXPECTED_STATE_SCHEMA_VERSION:
+        _emit(WARN_TAG, label, f"schema_version={schema}",
+              "Sync will upgrade the sidecar on its next save.")
+    elif schema > EXPECTED_STATE_SCHEMA_VERSION:
         _emit(WARN_TAG, label,
               f"schema_version={schema} (expected {EXPECTED_STATE_SCHEMA_VERSION})",
               "Migration may be needed; consult CHANGELOG.")
