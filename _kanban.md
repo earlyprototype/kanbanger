@@ -17,6 +17,7 @@
 ## DOING
 
 ## REVIEW
+*   [ ] Acquire the board lock before remote card creation
 
 ## DONE
 

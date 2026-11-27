@@ -338,18 +338,14 @@ class StateManager:
         return self.state
     
     def save(self):
-        """Save state to .kanban.json. D1: atomic write under cross-process lock.
-
-        Atomic write (R1 pattern via kanban_io.atomic_write_json) protects
-        against torn state files; the workspace-relative lock (R2 pattern via
-        kanban_io.kanban_lock) serializes against tools.py mutations and any
-        concurrent sync writer. Together they form D1's transactional pair —
-        both kanban_io.atomic_write_text (markdown, in tools.py) and
-        atomic_write_json (state, here) write under the same lock file.
-        """
+        """Acquire the board lock and save the current state atomically."""
         workspace = str(self.kanban_file.parent)
         with kanban_lock(workspace):
-            atomic_write_json(str(self.state_file), self.state)
+            self.save_locked()
+
+    def save_locked(self):
+        """Checkpoint state while the caller holds the board lock."""
+        atomic_write_json(str(self.state_file), self.state)
     
     def verify_board_key(self, board_key: Optional[str]) -> None:
         """Guard the sync state against a copied / swapped board (ADR 0002).
@@ -404,7 +400,7 @@ class StateManager:
         """Get the stored status for a task title."""
         return self.state["tasks"].get(task_title, {}).get("status")
     
-    def update_task(self, task_title: str, item_id: str, status: str):
+    def update_task(self, task_title: str, item_id: str, status: Optional[str]):
         """Update or add a task in the state."""
         self.state["tasks"][task_title] = {
             "item_id": item_id,
@@ -699,7 +695,14 @@ class Syncer:
         if len(parts) != 2 or not all(parts):
             raise ConfigurationError("GITHUB_REPO must be 'owner/repo'")
         owner, repo_name = parts
-        
+
+        with kanban_lock(str(self.state.kanban_file.parent)):
+            self._sync_locked(owner, repo_name, project_number)
+
+    def _sync_locked(
+        self, owner: str, repo_name: str, project_number: Optional[int]
+    ):
+        """Plan from the latest board and bindings, then checkpoint each mutation."""
         print(f"Parsing {self.board.file_path}...")
         local_tasks = self.board.parse()
         
@@ -712,7 +715,7 @@ class Syncer:
         # check; a keyed board's key is adopted into state on first sync.
         self.state.verify_board_key(read_board_key(self.board.file_path))
 
-        print(f"Connecting to GitHub repository {repo}...")
+        print(f"Connecting to GitHub repository {owner}/{repo_name}...")
         repo_node_id, project_id, status_field_id, status_options = self.client.get_repo_project(
             owner, repo_name, project_number
         )
@@ -746,7 +749,7 @@ class Syncer:
                 # desynced from GH (state thinks status set; GH has none;
                 # next sync sees stored == desired and skips forever).
                 self.state.update_task(title, item_id, None)
-                self.state.save()
+                self.state.save_locked()
 
                 # Set initial status
                 if desired_status in self.status_options:
@@ -756,7 +759,7 @@ class Syncer:
                     )
                     # Confirmed — persist status
                     self.state.update_task(title, item_id, desired_status)
-                    self.state.save()
+                    self.state.save_locked()
                 else:
                     # No matching Status option on the Project. Item is
                     # created with no Status; state stays at None so the
@@ -785,7 +788,7 @@ class Syncer:
                     )
                     # Confirmed — persist
                     self.state.update_task(title, item_id, desired_status)
-                    self.state.save()
+                    self.state.save_locked()
                 else:
                     # No matching Status option. Skip the update; state
                     # stays at stored_status. Sync will keep flagging
@@ -803,13 +806,13 @@ class Syncer:
                 self.state.remove_task(title)
                 # D7: persist after each archive so the local state matches
                 # the GH-side archive even if the loop is interrupted.
-                self.state.save()
+                self.state.save_locked()
 
         # End-of-loop save remains as a defensive flush; a no-op when
         # per-item saves already covered every mutation, but cheap and
         # keeps the existing "Sync complete" semantics intact.
         print(f"\nSaving state...")
-        self.state.save()
+        self.state.save_locked()
         print(f"Sync complete!")
 
 

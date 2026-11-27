@@ -302,6 +302,10 @@ And these **prompts**:
 
 Created next to the board on first real sync. It pairs local task titles with their GitHub item ids so re-syncs update instead of duplicate. It's machine-state, not content — provisioning already adds it to `.gitignore`. If it's deleted, the next sync re-creates state (and can duplicate items already on the Project), so leave it alone.
 
+Overlapping syncs for the same board take turns. Each reads the board and its saved bindings under the board lock.
+Sync saves each new card's ID before setting its status, so a failed status update can retry against the same card.
+Boards in separate directories can sync at the same time.
+
 ### The board-id marker
 
 Provisioning inserts one comment under the board's title:

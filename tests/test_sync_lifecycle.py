@@ -389,6 +389,8 @@ def test_created_item_is_durable_before_initial_status_failure(tmp_path):
     board_path.write_text(
         "# Board\n\n## TODO\n* [ ] New\n", encoding="utf-8"
     )
+    created = []
+    status_attempts = []
 
     class Client:
         @staticmethod
@@ -397,11 +399,14 @@ def test_created_item_is_durable_before_initial_status_failure(tmp_path):
 
         @staticmethod
         def create_draft_issue(project_id, title):
+            created.append(title)
             return "PVTI_new"
 
         @staticmethod
-        def update_item_status(*args):
-            raise GitHubAPIError("status failed")
+        def update_item_status(project_id, item_id, field_id, option_id):
+            status_attempts.append((item_id, option_id))
+            if len(status_attempts) == 1:
+                raise GitHubAPIError("status failed")
 
     with pytest.raises(GitHubAPIError, match="status failed"):
         Syncer(
@@ -417,6 +422,15 @@ def test_created_item_is_durable_before_initial_status_failure(tmp_path):
         "to_status": "Todo",
         "item_id": "PVTI_new",
     }]
+
+    Syncer(
+        LocalBoard(str(board_path)), StateManager(str(board_path)), Client()
+    ).sync("owner/repo", 8)
+    assert created == ["New"]
+    assert status_attempts == [("PVTI_new", "opt_todo")] * 2
+    assert StateManager(str(board_path)).load()["tasks"] == {
+        "New": {"item_id": "PVTI_new", "status": "Todo"}
+    }
 
 
 def test_archive_failure_keeps_state_for_retry(tmp_path):

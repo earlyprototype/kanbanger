@@ -16,6 +16,7 @@ Audit-driven foundation for tools.py mutations:
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -315,8 +316,8 @@ def kanban_lock(workspace: str) -> Iterator[None]:
     created if absent and left in place after release (presence is
     harmless and avoids race-on-creation between contenders).
 
-    Used to serialize mutations in tools.py and StateManager.save() in
-    sync_kanban.py so concurrent writers can't interleave a lost-update.
+    Board edits and sync runs use this same lock, so each writer can read
+    the preceding writer's changes before planning its own.
     Atomic writes (R1) protect against torn writes; the lock (R2)
     protects against lost updates.
     """
@@ -329,13 +330,15 @@ def kanban_lock(workspace: str) -> Iterator[None]:
     try:
         if sys.platform == "win32":
             import msvcrt
-            # Lock 1 byte at offset 0; LK_LOCK blocks until acquired.
-            # msvcrt.locking requires a non-empty file region, so write a
-            # placeholder byte if the file is empty.
-            if os.fstat(fd).st_size == 0:
-                os.write(fd, b"\0")
-                os.lseek(fd, 0, os.SEEK_SET)
-            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            # The region may extend past EOF, including on a new lock file.
+            # LK_LOCK reports EDEADLK after ten tries. A sync can take longer.
+            while True:
+                try:
+                    msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+                    break
+                except OSError as exc:
+                    if exc.errno != errno.EDEADLK:
+                        raise
             try:
                 yield
             finally:
