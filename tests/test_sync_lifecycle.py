@@ -19,6 +19,9 @@ from sync_kanban import (
 )
 
 
+KEYED_HEADER = "# Board\n<!-- kanbanger:board-id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->\n"
+
+
 def test_build_sync_plan_orders_local_changes_before_removed_state():
     """A missing action or wrong status direction corrupts the remote board."""
     local = {"New": "Todo", "Moved": "Review"}
@@ -208,19 +211,15 @@ def test_mcp_preview_reports_invalid_utf8_board_as_read_failure(tmp_path, monkey
     assert payload["error_code"] == "read_failed"
 
 
-def test_state_load_backs_up_and_resets_invalid_structure(tmp_path, capsys):
-    """Real sync preserves corrupt state but starts clean, risking duplicates."""
+def test_state_load_refuses_corruption_before_real_sync(tmp_path):
     state_path = tmp_path / ".kanban.json"
     corrupt = b"[]"
     state_path.write_bytes(corrupt)
 
-    state = StateManager(str(tmp_path / "_kanban.md")).load()
-
-    assert state["tasks"] == {}
-    backups = list(tmp_path.glob(".kanban.json.corrupt-*"))
-    assert len(backups) == 1
-    assert backups[0].read_bytes() == corrupt
-    assert "treat the board as never-synced" in capsys.readouterr().err
+    with pytest.raises(ConfigurationError, match="Sync state is corrupt"):
+        StateManager(str(tmp_path / "_kanban.md")).load()
+    assert state_path.read_bytes() == corrupt
+    assert list(tmp_path.glob(".kanban.json.corrupt-*")) == []
 
 
 def test_mcp_preview_import_does_not_load_cwd_or_workspace_dotenv(
@@ -302,20 +301,26 @@ def test_mcp_preview_rejects_copied_board_state(tmp_path, monkeypatch):
     assert payload["error_code"] == "board_key_mismatch"
 
 
-def test_sync_executes_local_plan_without_remote_reconciliation(tmp_path, monkeypatch):
-    """A remote fetch must not decide what local state creates, moves, or archives."""
+def test_sync_executes_local_plan_after_operator_binds_legacy_ids(tmp_path, monkeypatch):
+    """Reserve both legacy IDs across pages until the operator binds the drafts."""
     board_path = tmp_path / "_kanban.md"
     board_path.write_text(
-        "# Board\n\n## TODO\n* [ ] New\n\n## REVIEW\n* [ ] Moved\n",
+        KEYED_HEADER + "\n## TODO\n* [ ] New\n\n## REVIEW\n* [ ] Moved\n",
         encoding="utf-8",
     )
     state = StateManager(str(board_path))
+    state.state.update(board_key="a" * 32, project_id="PVT_project",
+                       reviewed_create_titles=["New"],
+                       reviewed_unmarked_items={"unrelated-" + title: {"type": "Issue", "title": title}
+                                                for title in ("Moved", "Removed")})
     state.state["tasks"] = {
         "Moved": {"item_id": "PVTI_moved", "status": "InProgress"},
         "Removed": {"item_id": "PVTI_removed", "status": "Done"},
     }
     state.save()
     calls = []
+    bodies = {"Moved": "Existing notes", "Removed": "Existing notes"}
+    provenance = {}
 
     class Response:
         status_code = 200
@@ -334,7 +339,7 @@ def test_sync_executes_local_plan_without_remote_reconciliation(tmp_path, monkey
         if "repository(owner" in query:
             return Response({"data": {"repository": {
                 "id": "R_repo",
-                "projectsV2": {"nodes": [{
+                "projectsV2": {"pageInfo": {"hasNextPage": False}, "nodes": [{
                     "id": "PVT_project", "number": 8, "title": "Project",
                     "fields": {"nodes": [{
                         "id": "PVTSSF_status", "name": "Status",
@@ -346,10 +351,44 @@ def test_sync_executes_local_plan_without_remote_reconciliation(tmp_path, monkey
                     }]},
                 }]},
             }}})
+        if "items(first:" in query:
+            second = variables["cursor"] == "next"
+            title = "Removed" if second else "Moved"
+            return Response({"data": {"node": {"provenanceField": {"dataType": "TEXT", "id": "field"},
+                                               "items": {
+                "pageInfo": {"hasNextPage": not second, "endCursor": "next"},
+                "nodes": [{
+                    "id": "PVTI_" + title.lower(), "isArchived": False,
+                    "content": {"__typename": "DraftIssue", "id": "draft-" + title,
+                                "title": title, "body": bodies[title]},
+                    "fieldValueByName": None,
+                    "provenance": provenance.get(title),
+                }, {
+                    "id": "unrelated-" + title, "isArchived": False,
+                    "content": {"__typename": "Issue", "id": "issue-" + title,
+                                "title": title, "body": ""}, "fieldValueByName": None, "provenance": None,
+                }],
+            }}}})
+        if "node(id: $id)" in query:
+            item_id = variables["id"]
+            title = item_id.removeprefix("PVTI_").title()
+            return Response({"data": {"node": {"id": item_id, "isArchived": False,
+                "provenance": provenance.get(title),
+                "content": {"__typename": "DraftIssue", "id": "draft-" + title,
+                            "title": title, "body": bodies[title]}}}})
+        if "updateProjectV2ItemFieldValue" in query and "marker" in variables:
+            title = variables["id"].removeprefix("PVTI_").title()
+            assert variables["field"] == "field"
+            assert variables["marker"].endswith(" PVTI_" + title.lower() + " -->")
+            provenance[title] = {"text": variables["marker"]}
+            return Response({"data": {"updateProjectV2ItemFieldValue": {
+                "projectV2Item": {"id": variables["id"]}
+            }}})
         if "addProjectV2DraftIssue" in query:
-            assert variables == {
-                "projectId": "PVT_project", "title": "New", "body": ""
-            }
+            assert variables["projectId"] == "PVT_project"
+            assert variables["title"] == "New"
+            assert variables["body"].startswith("<!-- kanbanger:item:v1 ")
+            bodies["New"] = variables["body"]
             return Response({"data": {"addProjectV2DraftIssue": {
                 "projectItem": {"id": "PVTI_new"}
             }}})
@@ -362,12 +401,18 @@ def test_sync_executes_local_plan_without_remote_reconciliation(tmp_path, monkey
             return Response({"data": {"archiveProjectV2Item": {
                 "item": {"id": "PVTI_removed"}
             }}})
-        raise AssertionError("remote reconciliation is not part of the sync plan")
+        raise AssertionError(query)
 
     monkeypatch.setattr("requests.post", fake_post)
-    Syncer(LocalBoard(str(board_path)), StateManager(str(board_path)), GitHubClient("token")).sync(
-        "owner/repo", 8
-    )
+    syncer = Syncer(LocalBoard(str(board_path)), StateManager(str(board_path)), GitHubClient("token"))
+    with pytest.raises(ConfigurationError, match="binding pending for PVTI_moved, PVTI_removed"):
+        syncer.sync("owner/repo", 8)
+    preview = syncer.sync("owner/repo", 8, recover=True, preview=True)
+    assert [op["title"] for op in preview["plan"]["operations"]] == ["New"]
+    assert not any("mutation" in call["query"] for call in calls)
+    for title in ("Moved", "Removed"):
+        bodies[title] += "\n" + preview["pending_legacy_bindings"]["PVTI_" + title.lower()]
+    syncer.sync("owner/repo", 8)
 
     saved = StateManager(str(board_path)).load()["tasks"]
     assert saved["New"]["status"] == "Todo"
@@ -375,7 +420,7 @@ def test_sync_executes_local_plan_without_remote_reconciliation(tmp_path, monkey
     assert "Removed" not in saved
     update_vars = [
         call["variables"] for call in calls
-        if "updateProjectV2ItemFieldValue" in call["query"]
+        if "optionId" in call["variables"]
     ]
     assert update_vars == [
         {"projectId": "PVT_project", "itemId": "PVTI_new", "fieldId": "PVTSSF_status", "optionId": "opt_todo"},
@@ -387,17 +432,29 @@ def test_created_item_is_durable_before_initial_status_failure(tmp_path):
     """A failed status mutation must retry UPDATE, not create a duplicate item."""
     board_path = tmp_path / "_kanban.md"
     board_path.write_text(
-        "# Board\n\n## TODO\n* [ ] New\n", encoding="utf-8"
+        KEYED_HEADER + "\n## TODO\n* [ ] New\n", encoding="utf-8"
     )
 
     class Client:
         @staticmethod
-        def get_repo_project(owner, repo, project_number):
+        def get_repo_project(owner, repo, project_number, bound_id):
             return "R_repo", "PVT_project", "PVTSSF_status", {"Todo": "opt_todo"}
 
         @staticmethod
-        def create_draft_issue(project_id, title):
+        def get_project_items(project_id):
+            return []
+
+        @staticmethod
+        def create_draft_issue(project_id, title, body):
             return "PVTI_new"
+
+        @staticmethod
+        def mark_draft(project_id, item_id, title, expected, marker):
+            assert item_id == "PVTI_new" and item_id in marker
+
+        @staticmethod
+        def verify_owned_draft(item_id, board_key, title):
+            assert (item_id, title) == ("PVTI_new", "New")
 
         @staticmethod
         def update_item_status(*args):
@@ -409,7 +466,7 @@ def test_created_item_is_durable_before_initial_status_failure(tmp_path):
         ).sync("owner/repo", 8)
 
     reloaded = StateManager(str(board_path)).load()["tasks"]
-    assert reloaded["New"] == {"item_id": "PVTI_new", "status": None}
+    assert reloaded["New"] == {"item_id": "PVTI_new", "status": None, "marked": True}
     assert build_sync_plan({"New": "Todo"}, reloaded)["operations"] == [{
         "action": "UPDATE",
         "title": "New",
@@ -422,21 +479,32 @@ def test_created_item_is_durable_before_initial_status_failure(tmp_path):
 def test_archive_failure_keeps_state_for_retry(tmp_path):
     """A failed archive must leave its item ID durable for the next sync."""
     board_path = tmp_path / "_kanban.md"
-    board_path.write_text("# Board\n\n## TODO\n", encoding="utf-8")
+    board_path.write_text(KEYED_HEADER + "\n## TODO\n", encoding="utf-8")
     state = StateManager(str(board_path))
+    state.state["board_key"] = "a" * 32
     state.state["tasks"] = {
-        "Removed": {"item_id": "PVTI_removed", "status": "Done"}
+        "Removed": {"item_id": "PVTI_removed", "status": "Done", "marked": True}
     }
     state.save()
 
     class Client:
         @staticmethod
-        def get_repo_project(owner, repo, project_number):
+        def get_repo_project(owner, repo, project_number, bound_id):
             return "R_repo", "PVT_project", "PVTSSF_status", {}
 
         @staticmethod
         def archive_item(project_id, item_id):
             raise GitHubAPIError("archive failed")
+
+        @staticmethod
+        def get_project_items(project_id):
+            return [dict(id="PVTI_removed", draft_id="draft", title="Removed",
+                         body=f"<!-- kanbanger:item:v2 {'a' * 32} 52656d6f766564 PVTI_removed -->",
+                         archived=False, status="Done")]
+
+        @staticmethod
+        def verify_owned_draft(item_id, board_key, title):
+            assert (item_id, title) == ("PVTI_removed", "Removed")
 
     with pytest.raises(GitHubAPIError, match="archive failed"):
         Syncer(
@@ -444,7 +512,7 @@ def test_archive_failure_keeps_state_for_retry(tmp_path):
         ).sync("owner/repo", 8)
 
     assert StateManager(str(board_path)).load()["tasks"] == {
-        "Removed": {"item_id": "PVTI_removed", "status": "Done"}
+        "Removed": {"item_id": "PVTI_removed", "status": "Done", "marked": True}
     }
 
 

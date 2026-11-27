@@ -170,7 +170,7 @@ kanban-sync _kanban.md             # sync to GitHub
 
 ## GitHub Projects V2 sync
 
-Optional. Sync is currently **one-way** (markdown → GitHub Projects). Tasks become draft issues on the Project; tasks removed locally are archived (not deleted) on GitHub; sync state lives in a `.kanban.json` sidecar next to the board.
+Optional sync runs **one way** from Markdown to GitHub Projects. It creates draft issues and records their Project item IDs in `.kanban.json` next to the board. Removing a task normally archives its draft. Recovered drafts require a manual archive.
 
 ### One-time GitHub setup
 
@@ -180,7 +180,7 @@ Optional. Sync is currently **one-way** (markdown → GitHub Projects). Tasks be
 
 **3. One-time: set the project's Status options** to exactly `Backlog, Todo, InProgress, Review, Done` (rename GitHub's default 'In Progress'; add 'Backlog' and 'Review'). Automating this is tracked.
 
-**4. Note the project number.** It's the `N` in the project URL (`github.com/users/<you>/projects/N`). Optional — when unset, the first project linked to the repo is used — but set it whenever more than one project is linked.
+**4. Note the project number.** It's the `N` in the project URL (`github.com/users/<you>/projects/N`). Set it for first sync or recovery when the repository has multiple linked Projects. Later syncs can use the Project ID in a valid sidecar.
 
 **5.** Create a ***Classic Personal Access Token***.
 
@@ -215,7 +215,7 @@ sync CLI subprocess still loads `.env` and can override inherited values.
 
 1. Restart the Claude session so the MCP server picks up the new env values.
 2. Ask your assistant to run a dry-run sync (`sync_to_github` with `dry_run`). It returns the local CREATE/UPDATE/ARCHIVE plan without credentials, network access, or a `.kanban.json` write. (`kanban-doctor` remains the manual/CI diagnostic.)
-3. Real run: ask for a sync — `sync_to_github()` creates draft issues for new tasks, archives removed ones, and writes the `.kanban.json` state sidecar. (CLI: `kanban-sync _kanban.md`.)
+3. Run `sync_to_github()` or `kanban-sync _kanban.md` to sync the board and save `.kanban.json`. If the Project already contains items and sync asks for recovery, [inspect the recovery preview](#recover-missing-stale-or-corrupt-state).
 
 ## Commands
 
@@ -245,7 +245,7 @@ Your AI assistant gets these **tools**:
 | `approve_done(title)` | Approve a REVIEW task to DONE (human decision) |
 | `reject_review(title, reason)` | Send a REVIEW task back with feedback |
 | `doctor(network?)` | Health-check the workspace binding, board file, and sync config |
-| `sync_to_github(dry_run?)` | Preview locally with `dry_run`; otherwise sync to GitHub |
+| `sync_to_github(dry_run?, recover?)` | Preview locally with `dry_run`. Use `recover` to inspect GitHub ownership and rebuild local state. |
 | `get_sync_status()` | Check sync state |
 
 These **resources** (always visible):
@@ -295,12 +295,38 @@ And these **prompts**:
 | `KANBANGER_WORKSPACE` | Directory containing `_kanban.md` (defaults to the resolved project dir) |
 | `GITHUB_TOKEN` | Classic PAT with `repo` + `project` scopes |
 | `GITHUB_REPO` | `owner/repo` the Project is linked to |
-| `GITHUB_PROJECT_NUMBER` | Project number from the project URL (optional; first linked project used when unset) |
+| `GITHUB_PROJECT_NUMBER` | Project number from the project URL. Required when multiple Projects are linked and a valid sidecar cannot identify the target. |
 | `KANBANGER_SYNC_TIMEOUT_SEC` | Timeout for the `sync_to_github` tool's sync run (default 60) |
 
 ### `.kanban.json` (sync state sidecar)
 
-Created next to the board on first real sync. It pairs local task titles with their GitHub item ids so re-syncs update instead of duplicate. It's machine-state, not content — provisioning already adds it to `.gitignore`. If it's deleted, the next sync re-creates state (and can duplicate items already on the Project), so leave it alone.
+Sync records the board ID, Project ID and GitHub item IDs in this file. Each new draft starts with a provisional comment. Once GitHub returns the item ID, sync saves it locally and writes the item ID, board ID and original task title to a Project text field named `Kanbanger provenance`. Sync creates the field on first use. When the field identifies the current item, its notes can contain one matching provisional comment on its own line, with ordinary text above or below it. Recovery also recognizes an item-bound comment on the last line of a draft's notes. Malformed, duplicate or conflicting claims stop sync.
+
+Sync reads earlier sidecars and saves schema version 2 when applying changes. Older ID-only acknowledgments require a fresh review before CREATE.
+
+Sync and recovery open the Markdown board read-only. Both require its board ID before applying changes. If the board previously had an ID, restore the original marker from version control or a backup. For a new or legacy board that has never had an ID, save and close the board, then run `kanbanger init` in the project directory or call `setup_project` to provision `_kanban.md`. You can also add `<!-- kanbanger:board-id: YOUR-UUID -->` under the title in your editor, replacing `YOUR-UUID` with a freshly generated UUID. Save the board and retry.
+
+#### Recover missing, stale, or corrupt state
+
+Use the same board and GitHub Project as the original sync. Run one sync at a time across copies that share a board ID.
+
+1. Run `kanban-sync _kanban.md --recover --dry-run` or call `sync_to_github(recover=True, dry_run=True)`. The report lists the target Project, active and archived claims, drafts awaiting markers, and the next sync plan. The `unmarked_items` map shows the Project item ID, content type and displayed title for each unmarked draft, issue and pull request. A plain `--dry-run` provides a local estimate.
+2. Compare each planned CREATE with that inventory. A backup can predate a legacy draft, and a renamed issue or pull request can represent the original task. If you identify a converted task, remove the duplicate local entry before syncing. For a legacy draft, restore its known-good sidecar and resolve any rename. A matching unmarked title blocks CREATE even after review.
+3. Resolve ownership conflicts before applying recovery. For an archived draft still listed locally, restore the draft on GitHub or remove the local task. For a provisional marker, verify the original item ID before restoring its sidecar entry. Recovery also reports copied markers, issues and pull requests carrying this board's marker, and unverifiable sidecar claims.
+4. Check `pending_legacy_claims` if the sidecar lacks a board ID. Verify the board ID in the preview and each listed Project item ID against a trusted record. If any item belongs to another board, restore the matching sidecar. Sync and recovery wait for confirmation of every pending claim before writing.
+5. Run `kanban-sync _kanban.md --recover` or call `sync_to_github(recover=True)` to rescan the Project and rebuild the sidecar. Recovery keeps the original bytes of a corrupt sidecar in `.kanban.json.corrupt-*`. To record your review, pass `--review-token TOKEN` from the preview along with the option for each item.
+
+   - `--reviewed-item ID` acknowledges that you checked an unmarked item against every planned CREATE. Apply requires a fresh preview if the displayed inventory or CREATE titles changed. A saved acknowledgment covers that item's ID, type and displayed title for the same board, Project and CREATE titles. A rename or conversion requires reviewing the item again. Sync checks the inventory before each CREATE. IDs in `unreviewed_item_ids` still need review.
+   - `--confirm-legacy-item ID` confirms that this board owns the listed sidecar claim. The recovery report lists confirmed active drafts that still need a marker under `pending_legacy_bindings`.
+
+   The MCP arguments are `review_token`, `reviewed_item_ids` and `confirmed_legacy_item_ids`. For example, use `sync_to_github(recover=True, review_token=TOKEN, reviewed_item_ids=["ID"])` for an unmarked item.
+
+6. Check `pending_legacy_bindings` for legacy drafts and interrupted creates. GitHub field writes target the Project item ID, which survives conversion to an issue. Open each listed item and verify that it is still the intended draft. In the draft editor, put the supplied comment on the last line of the notes, replacing any provisional comment and preserving the other text. If the item has become an issue, leave it untouched and reconcile the sidecar claim with the original task. Rerun the recovery preview to check the binding and the plan.
+7. Run ordinary sync. For `PENDING_UPDATE` or `PENDING_ARCHIVE`, inspect the printed item ID on GitHub. If it is still the intended draft, set the indicated Status or archive it manually. A status difference found during recovery stays pending even when the sidecar already records that draft. The next sync reads the current Status or clears a verified archived mapping. Keep ordinary drafts stable during automatic updates and archives because the ownership check and mutation are separate requests.
+
+Every sync state save checks for a concurrent restore. If a remote operation completed before the save was interrupted, use its reported item ID to reconcile the restored sidecar. If `.kanban.json.recovering` exists, compare it with `.kanban.json`, keep both versions, and move the displaced file to a backup name after putting the intended version at `.kanban.json`. Run the recovery preview again before resuming.
+
+For the live regression test, select a disposable linked Project with `KANBANGER_SANDBOX_REPO` and `KANBANGER_SANDBOX_PROJECT_NUMBER`, set `GITHUB_TOKEN`, and run `python -m pytest -s tests/test_sync_recovery_sandbox.py`. The test prints the recovered IDs for both forms of state loss, the unchanged sentinel ID, and the IDs confirmed archived during cleanup.
 
 ### The board-id marker
 

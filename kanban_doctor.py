@@ -67,6 +67,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
+from kanban_io import SCHEMA_VERSION as EXPECTED_STATE_SCHEMA_VERSION
+
 try:
     from dotenv import load_dotenv
 except ImportError:
@@ -74,7 +76,6 @@ except ImportError:
 
 GITHUB_API = "https://api.github.com/graphql"
 CLASSIC_PAT_RE = re.compile(r"^ghp_[A-Za-z0-9]{36}$")
-EXPECTED_STATE_SCHEMA_VERSION = 1
 # Dist names this project has shipped under. CANONICAL_DIST is the live
 # PyPI name (renamed from kanbanger-partymix for the 3.0 PyPI release,
 # issue #22). Anything in LEGACY_KANBANGER_DISTS is a stale install from
@@ -184,6 +185,14 @@ def _result_lines(status, name, detail, remediation, tags):
     return lines
 
 
+def _print_line(line):
+    """Escape characters the current output stream cannot represent."""
+    encoding = getattr(sys.stdout, "encoding", None)
+    if encoding:
+        line = line.encode(encoding, errors="backslashreplace").decode(encoding)
+    print(line)
+
+
 class _RunContext:
     """Mutable collector for one run_doctor() invocation.
 
@@ -204,7 +213,7 @@ class _RunContext:
     def line(self, plain: str, colored: Optional[str] = None) -> None:
         self.body_lines.append(plain)
         if self.echo:
-            print(colored if colored is not None else plain)
+            _print_line(colored if colored is not None else plain)
 
     def set_section(self, name: str) -> None:
         self.section = name
@@ -254,7 +263,7 @@ def _emit(tag, label, message, fix=None):
         ctx.add(status, label, message, fix)
         return
     for line in _result_lines(status, label, message, fix, {status: tag}):
-        print(line)
+        _print_line(line)
     _results[status.lower()] += 1
 
 
@@ -694,75 +703,75 @@ def check_projects_v2_access(token, repo, no_network):
     label = "Token can access Projects V2"
     if not token or not repo:
         _emit(SKIP_TAG, label, "skipped (prerequisites failed)")
-        return None
+        return None, None
     if no_network:
         _emit(SKIP_TAG, label, "skipped (--no-network)")
-        return None
+        return None, None
+    from sync_kanban import GitHubAPIError, GitHubClient
+
     try:
-        import requests
-    except ImportError:
-        return None
-    owner, repo_name = repo.split("/")
-    try:
-        resp = requests.post(
-            GITHUB_API,
-            headers={"Authorization": f"Bearer {token}"},
-            json={
-                "query": (
-                    "query($o:String!,$r:String!){"
-                    "repository(owner:$o,name:$r){"
-                    "projectsV2(first:5){nodes{id number title fields(first:20){"
-                    "nodes{... on ProjectV2SingleSelectField{name options{name}}}"
-                    "}}}}"
-                    "}"
-                ),
-                "variables": {"o": owner, "r": repo_name},
-            },
-            timeout=10,
-        )
-        data = resp.json()
-        if "errors" in data:
-            err_msg = data["errors"][0].get("message", "")
-            if "Resource not accessible" in err_msg or "fine-grained" in err_msg.lower():
-                _emit(FAIL_TAG, label,
-                      "Projects V2 NOT accessible -- likely a fine-grained PAT",
-                      "Generate a CLASSIC PAT with 'repo' and 'project' scopes. "
-                      "Fine-grained PATs cannot access Projects V2 GraphQL.")
-                return None
-            _emit(FAIL_TAG, label, f"GraphQL error: {err_msg}",
-                  "Check token scopes -- needs 'project' scope on classic PAT")
-            return None
-        nodes = data["data"]["repository"]["projectsV2"]["nodes"]
-        if not nodes:
-            _emit(WARN_TAG, label,
-                  "query succeeded but no projects linked to repo",
-                  f"Link a project: https://github.com/{repo}/projects")
-            return []
-        _emit(PASS_TAG, label, f"{len(nodes)} project(s) linked")
-        return nodes
+        repo_id, projects = GitHubClient(token).get_linked_projects(*repo.split("/"))
+    except GitHubAPIError as exc:
+        error = str(exc)
+        if "Resource not accessible" in error or "fine-grained" in error.lower():
+            _emit(FAIL_TAG, label,
+                  "Projects V2 NOT accessible -- likely a fine-grained PAT",
+                  "Generate a CLASSIC PAT with 'repo' and 'project' scopes. "
+                  "Fine-grained PATs cannot access Projects V2 GraphQL.")
+        else:
+            _emit(FAIL_TAG, label, error, "Check connectivity and the token's 'project' scope")
+        return None, None
     except Exception as e:
         _emit(FAIL_TAG, label, f"error: {e}", "Check connectivity")
-        return None
+        return None, None
+    if projects:
+        _emit(PASS_TAG, label, f"{len(projects)} project(s) linked")
+    else:
+        _emit(WARN_TAG, label, "query succeeded but no projects linked to repo",
+              f"Link a project: https://github.com/{repo}/projects")
+    return repo_id, projects
 
 
-def check_status_field(projects, environ=None):
+def check_status_field(projects, environ=None, *, workspace=None, repo_id=None):
     label = "Project Status field has required options"
     if not projects:
         _emit(SKIP_TAG, label, "skipped (no projects to check)")
         return
     if environ is None:
         environ = os.environ
-    project_num = environ.get("GITHUB_PROJECT_NUMBER", "").strip()
-    target = None
-    if project_num and project_num.isdigit():
-        target = next((p for p in projects if p["number"] == int(project_num)), None)
-        if not target:
-            _emit(FAIL_TAG, label,
-                  f"GITHUB_PROJECT_NUMBER={project_num} not found",
-                  f"Available numbers: {[p['number'] for p in projects]}")
-            return
-    else:
-        target = projects[0]
+    from kanban_io import read_board_key
+    from sync_kanban import (
+        ConfigurationError, GitHubClient, ProjectNotFoundError, StateManager,
+    )
+
+    number = environ.get("GITHUB_PROJECT_NUMBER")
+    try:
+        project_number = int(number) if number else None
+    except ValueError:
+        _emit(FAIL_TAG, label, "GITHUB_PROJECT_NUMBER must be an integer",
+              f"Available numbers: {[p['number'] for p in projects]}")
+        return
+    bound_id = None
+    try:
+        if workspace is not None:
+            board = workspace / "_kanban.md"
+            state = StateManager(board)
+            saved = state.load(read_only=True)
+            state.verify_board_key(read_board_key(board))
+            if saved.get("repo_node_id") not in (None, repo_id):
+                raise ConfigurationError(
+                    f"Ownership conflict: sidecar repo_node_id does not match {repo_id}"
+                )
+            bound_id = saved.get("project_id")
+        target = GitHubClient.select_linked_project(projects, project_number, bound_id)
+    except ProjectNotFoundError as exc:
+        _emit(FAIL_TAG, label, str(exc), f"Available numbers: {[p['number'] for p in projects]}")
+        return
+    except ConfigurationError as exc:
+        _emit(FAIL_TAG, label, str(exc),
+              "Verify the workspace board, its .kanban.json, and the configured "
+              "repository and Project.")
+        return
     status_field = None
     for f in target["fields"]["nodes"]:
         if f and f.get("name", "").lower() == "status":
@@ -813,24 +822,26 @@ def check_state_file(workspace):
     """R8: .kanban.json schema_version must be recognised by this version."""
     label = ".kanban.json schema"
     state_file = workspace / ".kanban.json"
-    if not state_file.exists():
-        _emit(PASS_TAG, label,
-              "no state file yet (will be created on first sync_to_github)")
-        return
+    from kanban_io import load_sync_state
+
     try:
-        data = json.loads(state_file.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        _emit(FAIL_TAG, label, ".kanban.json is not valid JSON",
-              "Delete the file -- R7 backup-and-reset will run on next sync.")
+        data = load_sync_state(state_file)
+    except FileNotFoundError:
+        _emit(PASS_TAG, label, "no state file yet (will be created on first sync_to_github)")
         return
-    except Exception as e:
-        _emit(WARN_TAG, label, f"could not read: {e}", "")
+    except (ValueError, RecursionError, OSError) as exc:
+        detail = "not valid JSON" if isinstance(exc, json.JSONDecodeError) else str(exc)
+        _emit(FAIL_TAG, label, f"Invalid sync state: {detail}",
+              "Restore a backup or inspect kanban-sync _kanban.md --recover --dry-run.")
         return
     schema = data.get("schema_version")
     if schema is None:
         _emit(WARN_TAG, label, "state file lacks schema_version",
-              "Run sync_to_github to regenerate, or delete .kanban.json.")
-    elif schema != EXPECTED_STATE_SCHEMA_VERSION:
+              "Sync will record the schema version on its next save.")
+    elif schema < EXPECTED_STATE_SCHEMA_VERSION:
+        _emit(WARN_TAG, label, f"schema_version={schema}",
+              "Sync will upgrade the sidecar on its next save.")
+    elif schema > EXPECTED_STATE_SCHEMA_VERSION:
         _emit(WARN_TAG, label,
               f"schema_version={schema} (expected {EXPECTED_STATE_SCHEMA_VERSION})",
               "Migration may be needed; consult CHANGELOG.")
@@ -1020,8 +1031,8 @@ def run_doctor(workspace, *, no_network: bool = False,
         if token and repo and not no_network:
             repo_ok = check_repo_accessible(token, repo, no_network)
             if repo_ok:
-                projects = check_projects_v2_access(token, repo, no_network)
-                check_status_field(projects, environ)
+                repo_id, projects = check_projects_v2_access(token, repo, no_network)
+                check_status_field(projects, environ, workspace=workspace, repo_id=repo_id)
             else:
                 _emit(SKIP_TAG, "Token can access Projects V2", "skipped (repo not accessible)")
                 _emit(SKIP_TAG, "Project Status field has required options", "skipped (repo not accessible)")

@@ -116,6 +116,8 @@ def _classify_sync_stderr(stderr: str) -> str:
         if not line.startswith("Error:"):
             continue
         body = line[len("Error:"):].strip()
+        if body.startswith("Ownership conflict"):
+            return "ownership_conflict"
         if "GITHUB_TOKEN" in body:
             return ERROR_MISSING_GITHUB_TOKEN
         if "GITHUB_REPO" in body or "--repo" in body:
@@ -799,13 +801,22 @@ def register_tools(server: FastMCP):
         return json.dumps(tasks, indent=2)
     
     @server.tool()
-    def sync_to_github(dry_run: bool = False) -> str:
+    def sync_to_github(dry_run: bool = False, recover: bool = False,
+                       reviewed_item_ids: Optional[list[str]] = None,
+                       review_token: Optional[str] = None,
+                       confirmed_legacy_item_ids: Optional[list[str]] = None) -> str:
         """
         Sync the kanban board to GitHub Projects V2.
         
         Args:
             dry_run: If True, returns the local sync plan without configuration,
-                network access, or state writes (default: False)
+                network access, or state writes. With recover, reads GitHub.
+            recover: Inspect remote ownership and rebuild the sidecar. With dry_run,
+                return the recovery preview without writing.
+            reviewed_item_ids: When applying recovery, acknowledge the unmarked
+                Project item IDs you checked against the planned creates.
+            review_token: The token from the recovery preview you checked.
+            confirmed_legacy_item_ids: Pending legacy IDs you verified belong to this board.
         
         Returns:
             Sync results or error message
@@ -833,32 +844,17 @@ def register_tools(server: FastMCP):
                 kanban_path=kanban_path,
             )
 
-        if dry_run:
-            from kanban_io import read_board_key
-            from sync_kanban import (
-                ConfigurationError,
-                LocalBoard,
-                StateManager,
-                _flatten_local_tasks,
-                build_sync_plan,
-            )
+        if (reviewed_item_ids or confirmed_legacy_item_ids or review_token) and (not recover or dry_run):
+            return _error(ERROR_CONFIGURATION, "Use review options when applying recovery.")
+        if dry_run and not recover:
+            from sync_kanban import BoardReadError, ConfigurationError, local_sync_preview
 
-            board = LocalBoard(kanban_path)
-            state = StateManager(kanban_path)
             try:
-                state.load(read_only=True)
-            except ConfigurationError as exc:
-                return _error(ERROR_CONFIGURATION, str(exc))
-            try:
-                state.verify_board_key(read_board_key(kanban_path))
-            except ConfigurationError as exc:
-                return _error(ERROR_BOARD_KEY_MISMATCH, str(exc))
-            try:
-                plan = build_sync_plan(
-                    _flatten_local_tasks(board.parse()), state.state["tasks"]
-                )
-            except ConfigurationError as exc:
+                plan = local_sync_preview(kanban_path)
+            except BoardReadError as exc:
                 return _error(ERROR_READ_FAILED, str(exc))
+            except ConfigurationError as exc:
+                return _error(_classify_sync_stderr(f"Error: {exc}"), str(exc))
             return _ok(mode="preview", plan=plan)
 
         # Check for required environment variables
@@ -880,6 +876,15 @@ def register_tools(server: FastMCP):
         # Audit R4: use sys.executable instead of bare "python" so the
         # subprocess always runs under the same interpreter as the MCP server.
         cmd = [sys.executable, "-m", "sync_kanban", kanban_path]
+        if recover:
+            cmd.append("--recover")
+            cmd.extend(f"--reviewed-item={item_id}" for item_id in reviewed_item_ids or [])
+            cmd.extend(f"--confirm-legacy-item={item_id}" for item_id in confirmed_legacy_item_ids or [])
+            if review_token is not None:
+                cmd.append(f"--review-token={review_token}")
+            if dry_run:
+                cmd.append("--dry-run")
+
         def _drain(stream, sink):
             try:
                 for chunk in iter(stream.readline, ''):
@@ -927,8 +932,9 @@ def register_tools(server: FastMCP):
         stderr = ''.join(stderr_chunks)
 
         if rc == 0:
-            mode = "preview" if dry_run else "complete"
-            return f"Sync {mode}:\n\n{stdout}"
+            if recover:
+                return _ok(mode="recovery_preview" if dry_run else "recovered", **json.loads(stdout))
+            return f"Sync complete:\n\n{stdout}"
 
         # E2: subprocess failed. Translate the E1-prefixed stderr
         # ("Error: <msg>") back to a structured code so callers don't

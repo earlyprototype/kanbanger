@@ -616,9 +616,9 @@ def test_verify_board_key_mismatch_raises_copied_board_error(tmp_path: Path):
         sm.verify_board_key("b" * 32)
 
 
-def test_verify_board_key_skips_unkeyed_board(tmp_path: Path):
-    """Legacy unkeyed boards keep syncing: a None board key is never
-    checked, even against state that records a key."""
+def test_verify_board_key_refuses_lost_marker(tmp_path: Path):
+    """A board which lost its recorded key must not mint a second identity."""
+    from sync_kanban import ConfigurationError
     (tmp_path / "_kanban.md").write_text(FIVE_COL, encoding="utf-8")
     (tmp_path / ".kanban.json").write_text(
         json.dumps({"schema_version": 1, "board_key": "a" * 32, "tasks": {}}),
@@ -626,7 +626,8 @@ def test_verify_board_key_skips_unkeyed_board(tmp_path: Path):
     )
     sm = _state_manager(tmp_path)
     sm.load()
-    sm.verify_board_key(None)  # must not raise, must not overwrite
+    with pytest.raises(ConfigurationError, match="Restore the matching board"):
+        sm.verify_board_key(None)
     assert sm.state["board_key"] == "a" * 32
 
 

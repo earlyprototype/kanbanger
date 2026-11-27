@@ -18,6 +18,7 @@ import subprocess
 import sys
 from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -37,7 +38,7 @@ VALID_BOARD = (
 )
 
 
-def _run_doctor(workspace: Path) -> subprocess.CompletedProcess:
+def _run_doctor(workspace: Path, *, encoding=None) -> subprocess.CompletedProcess:
     return subprocess.run(
         [
             sys.executable,
@@ -49,7 +50,16 @@ def _run_doctor(workspace: Path) -> subprocess.CompletedProcess:
         ],
         capture_output=True,
         text=True,
+        encoding=encoding,
     )
+
+
+def test_doctor_flags_sidecar_displaced_by_interrupted_recovery(tmp_path):
+    import kanban_doctor
+
+    (tmp_path / ".kanban.json.recovering").write_bytes(b'{"tasks":{}}')
+    out, counts = _capture_check(kanban_doctor.check_state_file, tmp_path)
+    assert counts["fail"] == 1 and ".kanban.json.recovering" in out
 
 
 def test_doctor_module_importable():
@@ -226,6 +236,67 @@ def test_status_field_passes_on_full_five_column_project(monkeypatch: pytest.Mon
     )
     assert counts["pass"] == 1, out
     assert "all five" in out
+
+
+@pytest.mark.parametrize(
+    ("number", "sidecar", "status", "message"),
+    [
+        (None, None, "FAIL", "GITHUB_PROJECT_NUMBER"),
+        ("8", None, "PASS", "Release"),
+        (None, {"board_key": "board-123", "repo_node_id": "R", "project_id": "P8"},
+         "PASS", "Release"),
+        ("11", {"project_id": "P8"}, "FAIL", "P8"),
+        (None, {"project_id": "unlinked"}, "FAIL", "unlinked"),
+        (None, {"repo_node_id": "other", "project_id": "P8"}, "FAIL", "repo_node_id"),
+        (None, {"board_key": "other-board", "project_id": "P8"}, "FAIL", "different board"),
+        (None, {"project_id": "P8", "tasks": []}, "FAIL", "corrupt"),
+        ("bad", None, "FAIL", "integer"),
+        ("99", None, "FAIL", "99"),
+    ],
+)
+def test_doctor_selects_linked_project_across_pages(
+    tmp_path, monkeypatch, number, sidecar, status, message,
+):
+    import requests
+    import kanban_doctor
+
+    board = tmp_path / "_kanban.md"
+    board.write_text("<!-- kanbanger:board-id: board-123 -->\n" + VALID_BOARD, encoding="utf-8")
+    state = tmp_path / ".kanban.json"
+    if sidecar is not None:
+        state.write_text(json.dumps({"tasks": {}, **sidecar}), encoding="utf-8")
+    before = state.read_bytes() if state.exists() else None
+    _set_doctor_env(monkeypatch, tmp_path)
+    monkeypatch.delenv("GITHUB_PROJECT_NUMBER", raising=False)
+    if number:
+        (tmp_path / ".env").write_text(f"GITHUB_PROJECT_NUMBER={number}\n", encoding="utf-8")
+
+    def post(url, *, headers, json, timeout):
+        document = json["query"]
+        if "viewer" in document:
+            data = {"viewer": {"login": "tester"}}
+        elif "projectsV2" in document:
+            second_page = json["variables"].get("cursor") == "next"
+            n, title = (8, "Release") if second_page else (11, "Triage")
+            options = [{"name": name, "id": name} for name in
+                       ("Backlog", "Todo", "InProgress", "Review", "Done")]
+            node = {"id": f"P{n}", "number": n, "title": title, "fields": {"nodes": [
+                {"id": "field", "name": "Status", "options": options}
+            ]}}
+            data = {"repository": {"id": "R", "projectsV2": {
+                "nodes": [node],
+                "pageInfo": {"hasNextPage": not second_page, "endCursor": "next"},
+            }}}
+        else:
+            data = {"repository": {"id": "R", "name": "repo"}}
+        return SimpleNamespace(status_code=200, json=lambda: {"data": data})
+
+    monkeypatch.setattr(requests, "post", post)
+    report = kanban_doctor.run_doctor(tmp_path)
+    check = next(r for r in report.results if r.name == "Project Status field has required options")
+    assert check.status == status, check
+    assert message in f"{check.detail} {check.remediation}", check
+    assert (state.read_bytes() if state.exists() else None) == before
 
 
 # --- issue #22: dist rename (kanbanger-partymix -> kanbanger) --------------
@@ -592,11 +663,28 @@ def test_read_mcp_project_env_handles_missing_and_unparseable(tmp_path: Path):
     assert kanban_doctor.read_mcp_project_env(tmp_path) == (True, None)
 
 
-def test_doctor_flags_corrupt_state_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """A `.kanban.json` that isn't valid JSON should produce a FAIL,
-    causing the doctor to exit 1."""
+@pytest.mark.parametrize(("contents", "detail"), [
+    (b"{", "not valid JSON"),
+    (b"\xff", "decode"),
+    (b"[]", "'tasks' object"),
+    (b'{"tasks":{"T":[]}}', "invalid task record"),
+    (b'{"tasks":{"T":{"item_id":null,"status":null}}}', "invalid item_id"),
+    (b'{"tasks":{}, "tasks":{}}', "duplicate JSON key"),
+    (b'{"schema_version":[], "tasks":{}}', "invalid schema_version"),
+    (b'{"reviewed_unmarked_ids":"issue-id", "tasks":{}}', "invalid reviewed_unmarked_ids"),
+    (b'{"reviewed_unmarked_ids":[{}], "tasks":{}}', "invalid reviewed_unmarked_ids"),
+    (b'{"reviewed_unmarked_ids":["issue-id"], "tasks":{}}', "require board and Project"),
+    (b'{"reviewed_unmarked_items":{"id":{"type":"Issue"}}, "tasks":{}}', "invalid reviewed_unmarked_items"),
+    (b'{"reviewed_unmarked_items":{"id":{"title":"Task","type":"other"}}, "tasks":{}}', "invalid reviewed_unmarked_items"),
+    (b'{"reviewed_create_titles":"unscoped", "tasks":{}}', "invalid reviewed_create_titles"),
+    (b'{"reviewed_create_titles":[null], "tasks":{}}', "invalid reviewed_create_titles"),
+    (b'{"tasks":{"held":{"item_id":"draft","status":"Done","recovered":0}}}', "invalid recovered flag"),
+    (b'{"board_key":"?", "tasks":{}}', "invalid board_key"),
+])
+def test_doctor_flags_corrupt_state_file(tmp_path, monkeypatch, contents, detail):
     (tmp_path / "_kanban.md").write_text(VALID_BOARD, encoding="utf-8")
-    (tmp_path / ".kanban.json").write_text("{ this is not valid json", encoding="utf-8")
+    path = tmp_path / ".kanban.json"
+    path.write_bytes(contents)
 
     monkeypatch.setenv("GITHUB_REPO", "owner/repo")
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_" + "A" * 36)
@@ -606,6 +694,21 @@ def test_doctor_flags_corrupt_state_file(tmp_path: Path, monkeypatch: pytest.Mon
         f"STDOUT:\n{result.stdout}\n"
         f"STDERR:\n{result.stderr}"
     )
-    assert "not valid JSON" in result.stdout, (
-        f"Expected doctor to mention 'not valid JSON', got:\n{result.stdout}"
-    )
+    assert detail in result.stdout
+    assert "--recover --dry-run" in result.stdout
+    assert "Traceback" not in result.stderr
+    assert path.read_bytes() == contents
+
+
+@pytest.mark.parametrize(("encoding", "tasks", "escaped"), [
+    ("cp1252", {"任务": []}, r"\u4efb\u52a1"),
+    ("utf-8", {title: {"item_id": "\ud800", "status": None} for title in ("A", "B")}, r"\ud800"),
+])
+def test_doctor_escapes_unprintable_state_diagnostic(tmp_path, monkeypatch, encoding, tasks, escaped):
+    (tmp_path / "_kanban.md").write_text(VALID_BOARD, encoding="utf-8")
+    (tmp_path / ".kanban.json").write_text(json.dumps({"tasks": tasks}), encoding="ascii")
+    monkeypatch.setenv("PYTHONIOENCODING", encoding + ":strict")
+    result = _run_doctor(tmp_path, encoding=encoding)
+    assert result.returncode == 1
+    assert "[FAIL] .kanban.json schema" in result.stdout and escaped in result.stdout
+    assert "--recover --dry-run" in result.stdout and "Traceback" not in result.stderr

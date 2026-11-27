@@ -30,6 +30,9 @@ from typing import Iterator, Optional, Tuple
 
 _LOCK_FILENAME = ".kanban.lock"
 _STATE_FILENAME = ".kanban.json"
+# Schema 2 uses Project-field provenance and item-specific review evidence.
+SCHEMA_VERSION = 2
+RECOVERY_SUFFIX = ".json.recovering"
 _KANBAN_FILENAME = "_kanban.md"
 _WINDOWS_REPLACE_ATTEMPTS = 5
 _WINDOWS_REPLACE_RETRY_DELAY_SECONDS = 0.05
@@ -54,8 +57,9 @@ _WINDOWS_REPLACE_RETRY_DELAY_SECONDS = 0.05
 # UUIDs (and future key formats) still read back; the canonical minted form
 # is uuid4().hex (32 lowercase hex chars). The length floor stops the reader
 # from latching onto arbitrary short junk in a lookalike comment.
+BOARD_KEY_PATTERN = r"[0-9A-Za-z-]{8,64}"
 _BOARD_KEY_RE = re.compile(
-    r"^\s*<!--\s*kanbanger:board-id:\s*([0-9A-Za-z-]{8,64})\s*-->\s*$"
+    rf"^\s*<!--\s*kanbanger:board-id:\s*({BOARD_KEY_PATTERN})\s*-->\s*$"
 )
 
 
@@ -109,16 +113,14 @@ def insert_board_key(text: str, board_key: str) -> str:
     Placement: directly under the FIRST `# ` title line; at the very top if
     the board has no title line. Every existing byte of `text` is preserved
     — the only change is the one inserted marker line (terminated with the
-    file's own newline style, CRLF or LF, so a CRLF board stays uniformly
-    CRLF). The caller is responsible for checking the text is not already
-    keyed (extract_board_key) — this function inserts unconditionally.
+    file's own newline style). The caller checks for an existing key.
     """
     marker = format_board_key_marker(board_key)
     lines = text.splitlines(keepends=True)
     if not lines:
         return marker + "\n"
 
-    newline = "\r\n" if lines[0].endswith("\r\n") else "\n"
+    newline = next((end for end in ("\r\n", "\r", "\n") if lines[0].endswith(end)), "\n")
     insert_at = 0
     for i, line in enumerate(lines):
         # lstrip a BOM (U+FEFF escape below) so a BOM-prefixed title still
@@ -369,6 +371,110 @@ def read_state(workspace: str) -> dict:
         }
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+class StateClaimConflict(ValueError):
+    """Multiple entries claim the same state key or remote item."""
+
+
+class MalformedSyncState(ValueError):
+    """Keep readable claims available for comparison with the remote markers."""
+
+    def __init__(self, detail, state, claims):
+        super().__init__(detail)
+        state = state if isinstance(state, dict) else {}
+        self.bindings = {
+            key: state[key] for key in ("board_key", "repo_node_id", "project_id")
+            if isinstance(state.get(key), str) and state[key].strip()
+        }
+        self.version = state.get("schema_version")
+        self.claims = claims
+
+
+def read_sync_state_bytes(path: Path) -> bytes:
+    """An interrupted replacement must not look like an empty sync history."""
+    displaced = path.with_suffix(RECOVERY_SUFFIX)
+    if displaced.exists():
+        raise ValueError(f"Interrupted recovery. Inspect {displaced} and restore the "
+                         f"intended {path.name} before retrying.")
+    return path.read_bytes()
+
+
+def load_sync_state(path: Path) -> dict:
+    """Read the sidecar with the same structural checks for sync and doctor."""
+    return parse_sync_state(read_sync_state_bytes(path))
+
+
+def parse_sync_state(source: bytes) -> dict:
+    """Validate the exact bytes read at the start of the scan."""
+    def unique_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise StateClaimConflict(f"duplicate JSON key {key!r}")
+            result[key] = value
+        return result
+
+    state = json.loads(source.decode("utf-8"), object_pairs_hook=unique_keys)
+    tasks = state.get("tasks") if isinstance(state, dict) else None
+    claims = {}
+    if isinstance(tasks, dict):
+        for title, task in sorted(tasks.items()):
+            item_id = task.get("item_id") if isinstance(task, dict) else None
+            if isinstance(item_id, str) and item_id.strip():
+                if item_id in claims:
+                    raise StateClaimConflict(f"multiple tasks claim item {item_id}")
+                claims[item_id] = title
+    try:
+        _validate_sync_state(state)
+    except ValueError as exc:
+        raise MalformedSyncState(str(exc), state, claims) from exc
+    return state
+
+
+def _validate_sync_state(state):
+    if not isinstance(state, dict) or not isinstance(state.get("tasks"), dict):
+        raise ValueError("expected an object with a 'tasks' object")
+    for key in ("board_key", "repo_node_id", "project_id"):
+        value = state.get(key)
+        if value is not None and not (isinstance(value, str) and value.strip()):
+            raise ValueError(f"invalid {key}")
+    board_key = state.get("board_key")
+    if board_key is not None and not re.fullmatch(BOARD_KEY_PATTERN, board_key):
+        raise ValueError("invalid board_key")
+    reviewed = state.get("reviewed_unmarked_ids", [])
+    if not isinstance(reviewed, list) or not all(
+        isinstance(item_id, str) and item_id.strip() for item_id in reviewed
+    ):
+        raise ValueError("invalid reviewed_unmarked_ids")
+    evidence = state.get("reviewed_unmarked_items", {})
+    if not isinstance(evidence, dict) or not all(
+        item_id.strip() and isinstance(item, dict)
+        and item.get("type") in ("DraftIssue", "Issue", "PullRequest")
+        and isinstance(item.get("title"), str)
+        for item_id, item in evidence.items()
+    ):
+        raise ValueError("invalid reviewed_unmarked_items")
+    if (reviewed or evidence) and not (board_key and state.get("project_id")):
+        raise ValueError("reviewed item IDs require board and Project bindings")
+    titles = state.get("reviewed_create_titles", [])
+    if not isinstance(titles, list) or not all(isinstance(title, str) and title.strip() for title in titles):
+        raise ValueError("invalid reviewed_create_titles")
+    version = state.get("schema_version", 0)
+    if type(version) is not int or version < 0:
+        raise ValueError("invalid schema_version")
+    for title, task in state["tasks"].items():
+        if not title.strip() or not isinstance(task, dict):
+            raise ValueError(f"invalid task record {title!r}")
+        item_id = task.get("item_id")
+        if not isinstance(item_id, str) or not item_id.strip():
+            raise ValueError(f"invalid item_id for {title!r}")
+        if "status" not in task or not isinstance(task["status"], (str, type(None))):
+            raise ValueError(f"invalid status for {title!r}")
+        if "marked" in task and type(task["marked"]) is not bool:
+            raise ValueError(f"invalid marker flag for {title!r}")
+        if "recovered" in task and type(task["recovered"]) is not bool:
+            raise ValueError(f"invalid recovered flag for {title!r}")
 
 
 def write_state(workspace: str, state: dict) -> None:

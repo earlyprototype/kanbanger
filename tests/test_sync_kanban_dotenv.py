@@ -187,8 +187,8 @@ def test_dotenv_find_usecwd_beats_rogue_parent_env(tmp_path: Path):
     sandboxed_src.mkdir(parents=True)
     # Copy only the modules needed by the CLI env loader, so this
     # is sufficient — and avoids dragging the whole repo into tmp.
-    shutil.copy2(source_root / "sync_kanban.py", sandboxed_src / "sync_kanban.py")
-    shutil.copy2(source_root / "kanban_io.py", sandboxed_src / "kanban_io.py")
+    for module in ("sync_kanban.py", "kanban_io.py", "kanban_recovery.py"):
+        shutil.copy2(source_root / module, sandboxed_src)
     # Rogue .env at a parent of the sandboxed source dir — what
     # find_dotenv() with default (caller-module) anchoring would hit.
     (rogue_root / ".env").write_text(

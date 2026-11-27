@@ -43,6 +43,8 @@ env/
 
 # Kanban state files (local only)
 .kanban.json
+.kanban.json.corrupt-*
+.kanban.json.recovering
 .kanban.lock
 
 # Note: _kanban.md is NOT ignored - commit it to track task history!
