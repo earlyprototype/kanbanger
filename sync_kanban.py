@@ -15,6 +15,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from kanban_io import (
     atomic_write_json,
+    extract_board_key,
     kanban_lock,
     parse_task_title_with_description,
     read_board_key,
@@ -148,6 +149,7 @@ class LocalBoard:
     def __init__(self, file_path: str):
         self.file_path = file_path
         self.tasks: Dict[str, List[Dict]] = {}
+        self.board_key: Optional[str] = None
     
     def parse(self) -> Dict[str, List[Dict]]:
         """Parse a markdown kanban file and return tasks by column.
@@ -175,6 +177,7 @@ class LocalBoard:
                 f"Unable to read kanban board: {self.file_path} ({exc})"
             ) from exc
 
+        self.board_key = extract_board_key(content)
         tasks = {}
         seen_per_section: Dict[str, set] = {}
         current_section = None
@@ -373,7 +376,11 @@ class StateManager:
         """
         workspace = str(self.kanban_file.parent)
         with kanban_lock(workspace):
-            atomic_write_json(str(self.state_file), self.state)
+            self.save_locked()
+
+    def save_locked(self):
+        """Persist a checkpoint while the caller holds the workspace lock."""
+        atomic_write_json(str(self.state_file), self.state)
     
     def verify_board_key(self, board_key: Optional[str]) -> None:
         """Guard the sync state against a copied / swapped board (ADR 0002).
@@ -783,7 +790,11 @@ class Syncer:
         self.status_options = {}
     
     def sync(self, repo: str, project_number: Optional[int] = None):
-        """Perform the full synchronization."""
+        """Serialize the plan, GitHub mutations and checkpoints with conversion."""
+        with kanban_lock(str(self.state.kanban_file.parent)):
+            self._sync_locked(repo, project_number)
+
+    def _sync_locked(self, repo: str, project_number: Optional[int]):
         owner, repo_name = _split_repository(repo)
         
         print(f"Parsing {self.board.file_path}...")
@@ -796,7 +807,7 @@ class Syncer:
         # this state file belongs to a different board than the one on
         # disk (raises ConfigurationError). Unkeyed legacy boards skip the
         # check; a keyed board's key is adopted into state on first sync.
-        self.state.verify_board_key(read_board_key(self.board.file_path))
+        self.state.verify_board_key(self.board.board_key)
 
         print(f"Connecting to GitHub repository {repo}...")
         repo_node_id, project_id, status_field_id, status_options = self.client.get_repo_project(
@@ -832,7 +843,7 @@ class Syncer:
                 # desynced from GH (state thinks status set; GH has none;
                 # next sync sees stored == desired and skips forever).
                 self.state.update_task(title, item_id, None)
-                self.state.save()
+                self.state.save_locked()
 
                 # Set initial status
                 if desired_status in self.status_options:
@@ -842,7 +853,7 @@ class Syncer:
                     )
                     # Confirmed — persist status
                     self.state.update_task(title, item_id, desired_status)
-                    self.state.save()
+                    self.state.save_locked()
                 else:
                     # No matching Status option on the Project. Item is
                     # created with no Status; state stays at None so the
@@ -871,7 +882,7 @@ class Syncer:
                     )
                     # Confirmed — persist
                     self.state.update_task(title, item_id, desired_status)
-                    self.state.save()
+                    self.state.save_locked()
                 else:
                     # No matching Status option. Skip the update; state
                     # stays at stored_status. Sync will keep flagging
@@ -889,13 +900,13 @@ class Syncer:
                 self.state.remove_task(title)
                 # D7: persist after each archive so the local state matches
                 # the GH-side archive even if the loop is interrupted.
-                self.state.save()
+                self.state.save_locked()
 
         # End-of-loop save remains as a defensive flush; a no-op when
         # per-item saves already covered every mutation, but cheap and
         # keeps the existing "Sync complete" semantics intact.
         print(f"\nSaving state...")
-        self.state.save()
+        self.state.save_locked()
         print(f"Sync complete!")
 
 

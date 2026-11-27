@@ -14,6 +14,7 @@ import subprocess
 import threading
 from contextlib import redirect_stdout
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Optional, Tuple
 from mcp.server.fastmcp import FastMCP
 
@@ -23,7 +24,6 @@ from kanban_doctor import render_report, run_doctor
 from kanban_io import (
     atomic_write_text,
     discover_columns,
-    extract_board_key,
     kanban_lock,
     parse_task_title_with_description as _parse_task_title_with_description,
 )
@@ -954,61 +954,28 @@ def register_tools(server: FastMCP):
         Use only on explicit request. Pass the exact tracked title shown by
         get_sync_status(). Returns item_id, issue_number and issue_url.
         """
-        from sync_kanban import (
-            ConfigurationError, GitHubAPIError, GitHubClient, StateManager,
-            sync_dotenv_overrides,
-        )
-
-        state = StateManager(get_kanban_path())
-        try:
-            board_text = state.kanban_file.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return _error(ERROR_KANBAN_NOT_FOUND, f"Board not found at {state.kanban_file}")
-        except (OSError, UnicodeError) as exc:
-            return _error(ERROR_READ_FAILED, f"Could not read the board: {exc}")
-        try:
-            if not state.state_file.is_file():
-                return _error(ERROR_CONFIGURATION, "Conversion requires an existing .kanban.json.")
-            saved = state.load(read_only=True)
-        except (OSError, ConfigurationError) as exc:
-            return _error(ERROR_CONFIGURATION, str(exc))
-        try:
-            state.verify_board_key(extract_board_key(board_text))
-        except ConfigurationError as exc:
-            return _error(ERROR_BOARD_KEY_MISMATCH, str(exc))
-
-        item_id = state.get_item_id(title)
-        if item_id is None:
-            return _error(ERROR_TASK_NOT_FOUND, f"No tracked Project item for '{title}'.")
-        if any(other_title != title and task["item_id"] == item_id
-               for other_title, task in saved["tasks"].items()):
-            return _error(
-                ERROR_CONFIGURATION,
-                f"Multiple task titles track Project item '{item_id}' in .kanban.json.",
-            )
-        saved_repo_id = saved.get("repo_node_id")
-        if not saved_repo_id:
-            return _error(
-                ERROR_CONFIGURATION,
-                "Sync state has no repository ID. Preview with sync_to_github(dry_run=True), "
-                "then run sync_to_github() to bind the repository before converting.",
-            )
-
         if error := _missing_github_credentials(os.environ):
             return error
         try:
-            settings = {**os.environ, **sync_dotenv_overrides(state.kanban_file.parent)}
-            if error := _missing_github_credentials(settings):
-                return error
-            client = GitHubClient(settings["GITHUB_TOKEN"])
-            repo_id = client.get_repository_id(settings["GITHUB_REPO"])
-            state.verify_repository(repo_id)
-            number, url = client.convert_draft_to_issue(item_id, repo_id)
-        except ConfigurationError as exc:
+            worker = subprocess.run(
+                [sys.executable, "-m", "kanbanger._conversion", get_workspace()],
+                cwd=Path(__file__).resolve().parents[1],
+                input=json.dumps(title), capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+                timeout=int(os.getenv("KANBANGER_SYNC_TIMEOUT_SEC", "60")),
+            )
+        except subprocess.TimeoutExpired:
+            return _error(
+                ERROR_SYNC_TIMEOUT, "Conversion timed out. Check the Project item before retrying."
+            )
+        except (OSError, ValueError) as exc:
             return _error(ERROR_CONFIGURATION, str(exc))
-        except GitHubAPIError as exc:
-            return _error(ERROR_GITHUB_API, str(exc))
-        return _ok(item_id=item_id, issue_number=number, issue_url=url)
+        if worker.returncode:
+            return _error(
+                ERROR_SYNC_SUBPROCESS_FAILED,
+                "Conversion worker failed. Check the Project item before retrying.",
+            )
+        return worker.stdout.strip()
 
     @server.tool()
     def get_sync_status() -> str:
