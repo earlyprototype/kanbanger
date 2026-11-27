@@ -20,27 +20,35 @@ from kanban_io import (
     read_board_key,
 )
 
-# Load environment variables from .env file if it exists.
-# override=True: the project's `.env` is the authoritative target for
-# this sync run. Without it, a shell-level export (e.g. a stale
-# GITHUB_REPO=owner/other-project from another workspace's profile
-# script) silently shadows the `.env` value and routes the sync to
-# the wrong project — items get written into another repo's Project
-# instead of the intended one, with no error surfaced.
-# find_dotenv(usecwd=True): the default `find_dotenv()` walks upward
-# from the *caller module's file location* (i.e. this file's
-# directory), not from the user's CWD. When kanban-sync is invoked
-# from a target project, that lookup can latch onto a rogue
-# parent-of-source-directory `.env` (e.g. ~/Desktop/AI/.env) and the
-# target project's `.env` is never considered. usecwd=True makes the
-# search start at os.getcwd() so the CWD-closest `.env` wins.
+
+def sync_dotenv_overrides(workspace: Path) -> dict[str, str]:
+    """Return settings from the nearest .env at or above the workspace."""
+    if os.getenv("PYTHON_DOTENV_DISABLED", "").lower() in {"1", "true", "t", "yes", "y"}:
+        return {}
+    try:
+        from dotenv import dotenv_values
+    except ImportError:
+        return {}
+
+    for directory in (workspace, *workspace.parents):
+        path = directory / ".env"
+        if path.is_file():
+            try:
+                values = dotenv_values(path)
+            except (OSError, UnicodeError) as exc:
+                raise ConfigurationError(f"Could not read {path}: {exc}") from exc
+            # Windows environment keys are case-insensitive. Match os.environ
+            # when these overrides are applied to an ordinary dict in the MCP.
+            return {
+                (key.upper() if os.name == "nt" else key): value
+                for key, value in values.items() if value is not None
+            }
+    return {}
+
+
 def _load_cli_dotenv() -> None:
     """Load the CLI cwd's `.env`, where project values override the shell."""
-    try:
-        from dotenv import find_dotenv, load_dotenv
-    except ImportError:
-        return
-    load_dotenv(find_dotenv(usecwd=True), override=True)
+    os.environ.update(sync_dotenv_overrides(Path.cwd()))
 
 
 # GitHub GraphQL endpoint
@@ -227,6 +235,13 @@ class LocalBoard:
         return tasks
 
 
+def _unique_state_keys(pairs: list[tuple[str, object]]) -> dict:
+    record = dict(pairs)
+    if len(record) != len(pairs):
+        raise ValueError("duplicate keys in a sync state object")
+    return record
+
+
 class StateManager:
     """Manages the .kanban.json sidecar file for state tracking."""
     
@@ -260,7 +275,9 @@ class StateManager:
         if state_exists:
             try:
                 with open(self.state_file, 'r', encoding='utf-8') as f:
-                    loaded = json.load(f)
+                    loaded = json.load(
+                        f, object_pairs_hook=_unique_state_keys if read_only else None
+                    )
                 if not isinstance(loaded, dict):
                     raise ValueError("top-level JSON value is not an object")
                 tasks = loaded.get("tasks")
@@ -435,13 +452,12 @@ class StateManager:
     def set_project_info(self, repo_node_id: str, project_id: str):
         """Set the repository and project IDs."""
         self.verify_repository(repo_node_id)
-        if self.state["tasks"] and not self.state.get("repo_node_id"):
-            saved_project = self.state.get("project_id")
-            if saved_project and saved_project != project_id:
-                raise ConfigurationError(
-                    "Cannot bind tracked items to a repository through a different "
-                    "Project. Select the Project recorded in .kanban.json."
-                )
+        saved_project = self.state.get("project_id")
+        if self.state["tasks"] and saved_project and saved_project != project_id:
+            raise ConfigurationError(
+                "Tracked items belong to a different Project. "
+                "Select the Project recorded in .kanban.json."
+            )
         self.state["repo_node_id"] = repo_node_id
         self.state["project_id"] = project_id
 
@@ -450,6 +466,8 @@ class GitHubClient:
     """Handles GitHub GraphQL API interactions."""
     
     def __init__(self, token: str):
+        if "\r" in token or "\n" in token:
+            raise ConfigurationError("The GitHub token contains a line break.")
         self.token = token
         self.headers = {
             "Authorization": f"Bearer {token}",
@@ -472,6 +490,9 @@ class GitHubClient:
                 json={"query": query, "variables": variables},
                 timeout=GITHUB_TIMEOUT_SEC,
             )
+        except self.requests.exceptions.InvalidHeader:
+            # Requests includes the rejected header value in the exception.
+            raise GitHubAPIError("GitHub API request failed: invalid request header") from None
         except self.requests.RequestException as exc:
             raise GitHubAPIError(f"GitHub API request failed: {exc}") from exc
         

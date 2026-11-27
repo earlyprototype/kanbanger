@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 import requests
@@ -458,6 +459,8 @@ def test_explicit_conversion_preserves_item_for_move_and_archive(
     (None, "configuration_error"),
     (b"{", "configuration_error"),
     (b'{"tasks":{"New":{"status":"Todo"}}}', "configuration_error"),
+    (b'{"repo_node_id":"R_repo","tasks":{"New":{"item_id":"PVTI_first","status":"Todo"},'
+     b'"New":{"item_id":"PVTI_new","status":"Todo"}}}', "configuration_error"),
     (b'{"tasks":{}, "repo_node_id":"R_repo"}', "task_not_found"),
 ])
 def test_conversion_refuses_missing_corrupt_or_untracked_state(
@@ -473,6 +476,95 @@ def test_conversion_refuses_missing_corrupt_or_untracked_state(
     assert project_graphql == []
     assert (path.read_bytes() if path.exists() else None) == saved
     assert list(kanban_workspace.glob(".kanban.json.corrupt-*")) == []
+
+
+def test_conversion_refuses_an_item_tracked_by_two_titles(
+    kanban_workspace, registered_tools, project_graphql
+):
+    state = StateManager(kanban_workspace / "_kanban.md")
+    state.set_project_info("R_repo", "PVT_project")
+    state.update_task("Original", "PVTI_new", "Todo")
+    state.update_task("New", "PVTI_new", "Todo")
+    state.save()
+    before = state.state_file.read_bytes()
+
+    result = json.loads(registered_tools["convert_task_to_issue"]("New"))
+
+    assert result["success"] is False
+    assert result["error_code"] == "configuration_error"
+    assert project_graphql == []
+    assert state.state_file.read_bytes() == before
+
+
+def test_sync_and_conversion_use_workspace_github_settings(
+    kanban_workspace, registered_tools, project_graphql, monkeypatch
+):
+    monkeypatch.delenv("PYTHON_DOTENV_DISABLED", raising=False)
+    monkeypatch.setenv("GITHUB_REPO", "server/other")
+    monkeypatch.setenv("GITHUB_TOKEN", "server-token")
+    monkeypatch.setenv("GITHUB_PROJECT_NUMBER", "99")
+    (kanban_workspace / ".env").write_text(
+        "GITHUB_REPO=owner/repo\nGITHUB_TOKEN=workspace-token\nGITHUB_PROJECT_NUMBER=8\n",
+        encoding="utf-8",
+    )
+    registered_tools["add_task"]("New")
+    state = StateManager(kanban_workspace / "_kanban.md")
+    state.update_task("New", "PVTI_new", "Todo")
+    state.save()
+
+    # Put the offline transport first even if Python omits cwd from sys.path.
+    source_root = Path(__file__).resolve().parents[1]
+    import_path = os.pathsep.join([str(kanban_workspace), str(source_root)])
+    monkeypatch.setenv("PYTHONPATH", import_path, prepend=os.pathsep)
+    (kanban_workspace / "requests.py").write_text(
+        "from types import SimpleNamespace\n"
+        "def post(url, *, headers, json, timeout):\n"
+        "    assert headers['Authorization'] == 'Bearer workspace-token'\n"
+        "    assert json['variables'] == {'owner': 'owner', 'repo': 'repo'}\n"
+        "    project = {'id': 'PVT_project', 'number': 8, 'fields': {'nodes': [\n"
+        "        {'id': 'field', 'name': 'Status', 'options': []}]}}\n"
+        "    repo = {'id': 'R_repo', 'projectsV2': {'nodes': [project]}}\n"
+        "    return SimpleNamespace(status_code=200, json=lambda: {'data': {'repository': repo}})\n",
+        encoding="utf-8",
+    )
+    sync_result = registered_tools["sync_to_github"]()
+    assert sync_result.startswith("Sync complete"), sync_result
+    assert state.load()["repo_node_id"] == "R_repo"
+
+    fake_post = requests.post
+
+    def check_credentials(url, *, headers, **kwargs):
+        assert headers["Authorization"] == "Bearer workspace-token"
+        return fake_post(url, headers=headers, **kwargs)
+
+    monkeypatch.setattr(requests, "post", check_credentials)
+    result = json.loads(registered_tools["convert_task_to_issue"]("New"))
+    assert result["success"] is True
+    assert result["item_id"] == "PVTI_new"
+    assert os.environ["GITHUB_REPO"] == "server/other"
+    assert os.environ["GITHUB_TOKEN"] == "server-token"
+    assert os.environ["GITHUB_PROJECT_NUMBER"] == "99"
+
+
+@pytest.mark.parametrize("missing", ["GITHUB_REPO", "GITHUB_TOKEN"])
+def test_workspace_dotenv_cannot_satisfy_mcp_preflight(
+    kanban_workspace, registered_tools, project_graphql, monkeypatch, missing
+):
+    state = StateManager(kanban_workspace / "_kanban.md")
+    state.set_project_info("R_repo", "PVT_project")
+    state.update_task("New", "PVTI_new", "Todo")
+    state.save()
+    before = state.state_file.read_bytes()
+    (kanban_workspace / ".env").write_text(
+        "GITHUB_REPO=owner/repo\nGITHUB_TOKEN=workspace-token\n", encoding="utf-8"
+    )
+    monkeypatch.delenv(missing)
+
+    for result in (registered_tools["sync_to_github"](),
+                   registered_tools["convert_task_to_issue"]("New")):
+        assert json.loads(result)["error_code"] == "missing_" + missing.lower()
+    assert project_graphql == []
+    assert state.state_file.read_bytes() == before
 
 
 @pytest.mark.parametrize("repo_id", [None, "", "R_other"])
@@ -524,14 +616,17 @@ def test_sync_binds_legacy_state_but_preserves_an_existing_repository_binding(
         assert all("mutation" not in c["query"] for c in project_graphql)
 
 
-def test_legacy_sync_refuses_to_bind_tracked_items_through_a_different_project(
-    kanban_workspace, registered_tools, project_graphql
+@pytest.mark.parametrize(("saved_repo", "status"), [
+    (None, "Todo"), ("R_repo", "Todo"), ("R_repo", "Review"),
+])
+def test_sync_refuses_to_bind_tracked_items_through_a_different_project(
+    kanban_workspace, registered_tools, project_graphql, saved_repo, status
 ):
     registered_tools["add_task"]("New")
     board = kanban_workspace / "_kanban.md"
     state = StateManager(str(board))
-    state.update_task("New", "PVTI_new", "Todo")
-    state.state["project_id"] = "PVT_original"
+    state.update_task("New", "PVTI_new", status)
+    state.set_project_info(saved_repo, "PVT_original")
     state.save()
     before = state.state_file.read_bytes()
 
@@ -664,6 +759,23 @@ def test_github_client_translates_request_failures(monkeypatch):
         GitHubClient("token")._query("query { viewer { login } }", {})
 
     assert isinstance(caught.value.__cause__, requests.Timeout)
+
+
+def test_invalid_header_error_omits_the_authorization_value(monkeypatch):
+    def reject_header(url, *, headers, **kwargs):
+        raise requests.exceptions.InvalidHeader(headers["Authorization"])
+
+    monkeypatch.setattr(requests, "post", reject_header)
+    with pytest.raises(GitHubAPIError, match="GitHub API request failed") as caught:
+        GitHubClient("test-credential").get_repository_id("owner/repo")
+    assert "test-credential" not in str(caught.value)
+
+
+def test_token_with_a_trailing_newline_fails_before_any_request(project_graphql):
+    with pytest.raises(ConfigurationError, match="token contains a line break") as caught:
+        GitHubClient("test-credential\n").get_repository_id("owner/repo")
+    assert "test-credential" not in str(caught.value)
+    assert project_graphql == []
 
 
 def test_github_client_rejects_a_non_json_response(monkeypatch):

@@ -13,6 +13,7 @@ import difflib
 import subprocess
 import threading
 from contextlib import redirect_stdout
+from collections.abc import Mapping
 from typing import Optional, Tuple
 from mcp.server.fastmcp import FastMCP
 
@@ -99,6 +100,17 @@ def _ok(**payload) -> str:
     coordination primitives use this richer shape.
     """
     return json.dumps({"success": True, **payload}, indent=2)
+
+
+def _missing_github_credentials(environ: Mapping[str, str]) -> Optional[str]:
+    for name, code in (("GITHUB_TOKEN", ERROR_MISSING_GITHUB_TOKEN),
+                       ("GITHUB_REPO", ERROR_MISSING_GITHUB_REPO)):
+        if not environ.get(name):
+            return _error(
+                code, f"{name} environment variable not set. "
+                "Run the `doctor` tool to diagnose sync configuration.",
+            )
+    return None
 
 
 def _classify_sync_stderr(stderr: str) -> str:
@@ -862,19 +874,8 @@ def register_tools(server: FastMCP):
                 return _error(ERROR_READ_FAILED, str(exc))
             return _ok(mode="preview", plan=plan)
 
-        # Check for required environment variables
-        if not os.getenv("GITHUB_TOKEN"):
-            return _error(
-                ERROR_MISSING_GITHUB_TOKEN,
-                "GITHUB_TOKEN environment variable not set. "
-                "Run the `doctor` tool to diagnose sync configuration.",
-            )
-        if not os.getenv("GITHUB_REPO"):
-            return _error(
-                ERROR_MISSING_GITHUB_REPO,
-                "GITHUB_REPO environment variable not set. "
-                "Run the `doctor` tool to diagnose sync configuration.",
-            )
+        if error := _missing_github_credentials(os.environ):
+            return error
         
         TIMEOUT_SEC = int(os.getenv("KANBANGER_SYNC_TIMEOUT_SEC", "60"))
 
@@ -953,7 +954,10 @@ def register_tools(server: FastMCP):
         Use only on explicit request. Pass the exact tracked title shown by
         get_sync_status(). Returns item_id, issue_number and issue_url.
         """
-        from sync_kanban import ConfigurationError, GitHubAPIError, GitHubClient, StateManager
+        from sync_kanban import (
+            ConfigurationError, GitHubAPIError, GitHubClient, StateManager,
+            sync_dotenv_overrides,
+        )
 
         state = StateManager(get_kanban_path())
         try:
@@ -976,6 +980,12 @@ def register_tools(server: FastMCP):
         item_id = state.get_item_id(title)
         if item_id is None:
             return _error(ERROR_TASK_NOT_FOUND, f"No tracked Project item for '{title}'.")
+        if any(other_title != title and task["item_id"] == item_id
+               for other_title, task in saved["tasks"].items()):
+            return _error(
+                ERROR_CONFIGURATION,
+                f"Multiple task titles track Project item '{item_id}' in .kanban.json.",
+            )
         saved_repo_id = saved.get("repo_node_id")
         if not saved_repo_id:
             return _error(
@@ -984,15 +994,14 @@ def register_tools(server: FastMCP):
                 "then run sync_to_github() to bind the repository before converting.",
             )
 
-        token = os.getenv("GITHUB_TOKEN")
-        if not token:
-            return _error(ERROR_MISSING_GITHUB_TOKEN, "GITHUB_TOKEN environment variable not set.")
-        repo = os.getenv("GITHUB_REPO")
-        if not repo:
-            return _error(ERROR_MISSING_GITHUB_REPO, "GITHUB_REPO environment variable not set.")
+        if error := _missing_github_credentials(os.environ):
+            return error
         try:
-            client = GitHubClient(token)
-            repo_id = client.get_repository_id(repo)
+            settings = {**os.environ, **sync_dotenv_overrides(state.kanban_file.parent)}
+            if error := _missing_github_credentials(settings):
+                return error
+            client = GitHubClient(settings["GITHUB_TOKEN"])
+            repo_id = client.get_repository_id(settings["GITHUB_REPO"])
             state.verify_repository(repo_id)
             number, url = client.convert_draft_to_issue(item_id, repo_id)
         except ConfigurationError as exc:
