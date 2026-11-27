@@ -685,7 +685,7 @@ class GitHubClient:
 
     def mark_draft(self, project_id: str, item_id: str, expected_title: str,
                    expected_body: str, marker: str):
-        """Bind the Project item without replacing any editable draft text."""
+        """Set provenance on the draft returned by this sync's CREATE."""
         draft = self._get_active_draft(item_id)
         if (draft.get("title") != expected_title or draft["body"] != expected_body
                 or draft["provenance"] is not None):
@@ -871,7 +871,19 @@ class Syncer:
             inventory.tasks.pop(title, None)
             inventory.legacy.pop(title, None)
             inventory.archived.pop(item_id, None)
-        plan = build_sync_plan(local, inventory.tasks)
+        # A Project field write cannot require that a legacy item is still a draft.
+        # Reserve its task title while an operator binds the draft in its editor.
+        if inventory.legacy and not recover:
+            ids = ", ".join(sorted(inventory.legacy.values()))
+            raise ConfigurationError(
+                f"Legacy draft binding pending for {ids}. Inspect pending_legacy_bindings in "
+                "--recover --dry-run. Verify each draft and place its listed marker on the "
+                "last line of its notes, replacing any provisional marker. Then retry sync."
+            )
+        plan = build_sync_plan(
+            {title: status for title, status in local.items() if title not in inventory.legacy},
+            {title: record for title, record in inventory.tasks.items() if title not in inventory.legacy},
+        )
         create_titles = sorted(op["title"] for op in plan["operations"] if op["action"] == "CREATE")
         scope = [board_key, project_id, create_titles, inventory.pending_legacy,
                  inventory.unmarked, inventory.legacy_evidence]
@@ -925,7 +937,11 @@ class Syncer:
                 "pending_legacy_claims": pending,
                 "pending_legacy_items": {item_id: inventory.legacy_evidence[item_id] for item_id in pending},
                 "review_token": current_token,
-                "mark_on_next_sync": {title: item["id"] for title, item in inventory.legacy.items()},
+                "mark_on_next_sync": {},
+                "pending_legacy_bindings": {
+                    item_id: item_marker(board_key, title, item_id)
+                    for title, item_id in inventory.legacy.items()
+                },
                 "plan": plan,
             }
             if state_error:
@@ -945,13 +961,6 @@ class Syncer:
             if backup is not None:
                 report["backup"] = str(backup)
             return report
-
-        # A valid legacy sidecar supplies the item IDs for this migration.
-        for title, item in inventory.legacy.items():
-            marker = item_marker(board_key, title, item["id"])
-            self.client.mark_draft(project_id, item["id"], item["title"], item["body"], marker)
-            self.state.state["tasks"][title]["marked"] = True
-            self.state.save_after("MARK", title, item["id"])
 
         self._apply_plan(plan, project_id, field_id, options, board_key, local, reviewed)
 

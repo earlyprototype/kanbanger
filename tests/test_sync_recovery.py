@@ -336,7 +336,7 @@ def test_recovery_detects_sidecar_removal_during_scan(tmp_path, monkeypatch):
     assert not path.exists()
 
 
-@pytest.mark.parametrize("stage", ["create", "initial status", "update", "archive", "migration"])
+@pytest.mark.parametrize("stage", ["create", "initial marker", "initial status", "update", "archive"])
 def test_restore_during_ordinary_write_preserves_bytes_and_reports_item(tmp_path, monkeypatch, stage):
     board = tmp_path / "_kanban.md"
     path = tmp_path / ".kanban.json"
@@ -345,18 +345,15 @@ def test_restore_during_ordinary_write_preserves_bytes_and_reports_item(tmp_path
     if stage in ("update", "archive"):
         run(board, project)
         board_at(board, "## DONE\n* [ ] Current\n" if stage == "update" else "## TODO\n")
-    elif stage == "migration":
-        current = project.create_draft_issue("project", "Current", "Existing notes")
-        path.write_text(json.dumps({"board_key": KEY, "tasks": {"Current": {"item_id": current, "status": "Todo"}}}))
     else:
         path.write_bytes(b'{"tasks":{}}')
     legacy = project.create_draft_issue("project", "Legacy", "Existing draft")
-    if stage in ("create", "initial status"):
+    if stage in ("create", "initial marker", "initial status"):
         token = run(board, project, recover=True, preview=True)["review_token"]
         run(board, project, recover=True, reviewed_item_ids=[legacy], review_token=token)
     restored = json.dumps({"tasks": {"Legacy": {"item_id": legacy, "status": "Todo"}}},
                           indent=4).encode() + b"\n"
-    methods = {"create": "create_draft_issue", "archive": "archive_item", "migration": "mark_draft"}
+    methods = {"create": "create_draft_issue", "archive": "archive_item", "initial marker": "mark_draft"}
     method = methods.get(stage, "update_item_status")
     mutate = getattr(project, method)
 
@@ -510,7 +507,7 @@ def test_create_response_lost_with_valid_sidecar(tmp_path, monkeypatch):
     assert project.writes == [("create", "item-0")]
 
 
-def test_interrupted_marker_write_retries_using_confirmed_id(tmp_path, monkeypatch):
+def test_interrupted_marker_write_resumes_after_operator_binds_confirmed_id(tmp_path, monkeypatch):
     board = tmp_path / "_kanban.md"
     board_at(board, "## TODO\n* [ ] Retry\n")
     project = Project()
@@ -525,11 +522,14 @@ def test_interrupted_marker_write_retries_using_confirmed_id(tmp_path, monkeypat
     path = tmp_path / ".kanban.json"
     assert json.loads(path.read_text())["tasks"]["Retry"]["item_id"] == "item-0"
     preview = run(board, project, recover=True, preview=True)
-    assert preview["mark_on_next_sync"] == {"Retry": "item-0"}
+    with pytest.raises(ConfigurationError, match="binding pending for item-0"):
+        run(board, project)
+    assert project.writes == [("create", "item-0")]
+    project.items[0]["body"] = preview["pending_legacy_bindings"]["item-0"]
     run(board, project)
     path.unlink()
     assert run(board, project, recover=True, preview=True)["owned"] == {"Retry": "item-0"}
-    assert project.writes == [("create", "item-0"), ("mark", "item-0"), ("update", "item-0")]
+    assert project.writes == [("create", "item-0"), ("update", "item-0")]
 
 
 def test_v1_marker_needs_matching_sidecar_to_upgrade(tmp_path):
@@ -545,9 +545,14 @@ def test_v1_marker_needs_matching_sidecar_to_upgrade(tmp_path):
     path = tmp_path / ".kanban.json"
     path.write_text(json.dumps({"board_key": KEY, "tasks": {"Legacy": {"item_id": item_id, "status": "Todo",
                                                      "marked": True}}}))
-    run(board, project)
+    with pytest.raises(ConfigurationError, match="binding pending"):
+        run(board, project)
     assert project.items[0]["body"] == old
-    assert project.items[0]["provenance"] == f"<!-- kanbanger:item:v2 {KEY} 4c6567616379 {item_id} -->"
+    marker = run(board, project, recover=True, preview=True)["pending_legacy_bindings"][item_id]
+    assert marker == f"<!-- kanbanger:item:v2 {KEY} 4c6567616379 {item_id} -->"
+    project.items[0]["body"] = notes + marker
+    run(board, project)
+    assert project.items[0]["body"] == notes + marker
     path.unlink()
     assert run(board, project, recover=True, preview=True)["owned"] == {"Legacy": item_id}
 
@@ -560,10 +565,14 @@ def test_recorded_legacy_notes_can_quote_a_marker_prefix(tmp_path):
     item_id = project.create_draft_issue("project", "Legacy", notes)
     path = tmp_path / ".kanban.json"
     path.write_text(json.dumps({"board_key": KEY, "tasks": {"Legacy": {"item_id": item_id, "status": "Todo"}}}))
-    assert run(board, project, recover=True, preview=True)["mark_on_next_sync"] == {"Legacy": item_id}
-    run(board, project)
+    preview = run(board, project, recover=True, preview=True)
+    assert preview["pending_legacy_bindings"] == {item_id: f"<!-- kanbanger:item:v2 {KEY} 4c6567616379 {item_id} -->"}
+    with pytest.raises(ConfigurationError, match="binding pending"):
+        run(board, project)
     assert project.items[0]["body"] == notes
-    assert project.items[0].pop("provenance") == f"<!-- kanbanger:item:v2 {KEY} 4c6567616379 {item_id} -->"
+    project.items[0]["body"] += preview["pending_legacy_bindings"][item_id]
+    run(board, project)
+    project.items[0]["body"] = notes
     before = path.read_bytes()
     project.writes.clear()
     with pytest.raises(ConfigurationError, match=f"{item_id}.*marker missing"):
@@ -710,7 +719,7 @@ def test_unbound_legacy_claim_requires_board_and_item_confirmation(tmp_path):
     project.writes.clear()
     preview = run(board, project, recover=True, preview=True)
     assert preview["pending_legacy_claims"] == {item_id: "Legacy"}
-    assert preview["owned"] == preview["mark_on_next_sync"] == {}
+    assert preview["owned"] == preview["mark_on_next_sync"] == preview["pending_legacy_bindings"] == {}
     assert preview["plan"]["operations"] == []
     for options in ({"recover": True}, {}):
         with pytest.raises(ConfigurationError, match=item_id):
@@ -753,11 +762,123 @@ def test_partial_legacy_confirmation_preserves_unbound_sidecar(tmp_path):
     assert report["pending_legacy_claims"] == {}
     assert report["owned"] == {"Active": active} and report["archived"] == {archived: "Archived"}
     assert project.items == before and project.writes == []
+    assert report["pending_legacy_bindings"] == {active: f"<!-- kanbanger:item:v2 {KEY} 416374697665 {active} -->"}
+    with pytest.raises(ConfigurationError, match=f"binding pending for {active}"):
+        run(board, project)
+    assert project.items == before and project.writes == []
+    project.items[0]["body"] += "\n" + report["pending_legacy_bindings"][active]
     run(board, project)
-    assert project.writes == [("mark", active)]
-    assert project.items[0]["body"] == "Notes"
-    assert project.items[0]["provenance"] == f"<!-- kanbanger:item:v2 {KEY} 416374697665 {active} -->"
+    assert project.writes == []
     assert project.items[1] == before[1]
+
+
+@pytest.mark.parametrize("boundary", ["after inventory", "at field write"])
+def test_confirmed_legacy_conversion_gets_no_writes(tmp_path, monkeypatch, boundary):
+    board = tmp_path / "_kanban.md"
+    board_at(board, "## TODO\n* [ ] Original\n")
+    project = Project()
+    item_id = project.create_draft_issue("project", "Original", "Legacy notes")
+    item, = project.items
+    item["status"] = "Todo"
+    path = tmp_path / ".kanban.json"
+    path.write_text(json.dumps({"tasks": {"Original": {"item_id": item_id, "status": "Todo"}}}))
+    preview = run(board, project, recover=True, preview=True)
+    run(board, project, recover=True, confirmed_legacy_item_ids=[item_id],
+        review_token=preview["review_token"])
+    confirmed = path.read_bytes()
+    project.writes.clear()
+
+    def convert():
+        item.update(type="Issue", draft_id=None, title="Renamed after conversion")
+
+    inventory = project.get_project_items
+    query = project._query
+
+    def snapshot(project_id):
+        rows = inventory(project_id)
+        if boundary == "after inventory":
+            convert()
+        return rows
+
+    def convert_at_write(document, variables):
+        if "updateProjectV2ItemFieldValue" in document:
+            convert()
+        return query(document, variables)
+
+    monkeypatch.setattr(project, "get_project_items", snapshot)
+    monkeypatch.setattr(project, "_query", convert_at_write)
+    error = None
+    try:
+        run(board, project)
+    except ConfigurationError as exc:
+        error = str(exc)
+    assert project.writes == []
+    assert error and item_id in error and "pending" in error.lower()
+    assert "provenance" not in item and path.read_bytes() == confirmed
+
+    # A refused field write never reaches the mutation hook. Convert the draft
+    # before the next scan in that case and verify the recorded ID still blocks sync.
+    convert()
+    for options in ({}, {"recover": True, "preview": True}, {"recover": True}):
+        with pytest.raises(ConfigurationError, match=f"{item_id}.*repository issue"):
+            run(board, project, **options)
+    assert project.writes == [] and path.read_bytes() == confirmed
+
+
+def test_appended_notes_preserve_field_bound_draft_through_recovery(tmp_path):
+    board = tmp_path / "_kanban.md"
+    board_at(board, "## TODO\n* [ ] Original\n")
+    project = Project()
+    run(board, project)
+    item, = project.items
+    item["title"] = "Renamed on GitHub"
+    item["body"] = "Opening notes\r\n\r\n" + item["body"] + "\r\n\r\nAppended paragraph.\r\n"
+    before = deepcopy(item)
+    project.writes.clear()
+    run(board, project)
+    path = tmp_path / ".kanban.json"
+    path.unlink()
+    preview = run(board, project, recover=True, preview=True)
+    assert preview["owned"] == {"Original": item["id"]} and preview["plan"]["operations"] == []
+    assert not path.exists()
+    run(board, project, recover=True)
+    run(board, project)
+    assert json.loads(path.read_bytes())["tasks"]["Original"]["item_id"] == item["id"]
+    assert project.items == [before] and project.writes == []
+
+
+@pytest.mark.parametrize("damage", [
+    "missing field", "wrong item ID", "duplicate", "malformed", "contradictory", "embedded",
+])
+def test_appended_notes_with_unverified_claim_block_recovery(tmp_path, damage):
+    board = tmp_path / "_kanban.md"
+    board_at(board, "## TODO\n* [ ] Original\n")
+    project = Project()
+    run(board, project)
+    item, = project.items
+    provisional = item["body"]
+    if damage == "missing field":
+        del item["provenance"]
+    elif damage == "wrong item ID":
+        item["provenance"] = item["provenance"].replace(item["id"], "other-id")
+    elif damage == "duplicate":
+        item["body"] += "\n" + provisional
+    elif damage == "malformed":
+        item["body"] += "\n<!-- kanbanger:item:v1 broken -->"
+    elif damage == "contradictory":
+        item["body"] = provisional.replace(KEY, "b" * 32)
+    else:
+        item["body"] = "Quoted " + provisional
+    item["body"] += "\n\nAppended paragraph."
+    path = tmp_path / ".kanban.json"
+    project.writes.clear()
+    with pytest.raises(ConfigurationError, match="Ownership conflict"):
+        run(board, project)
+    path.unlink()
+    for preview in (True, False):
+        with pytest.raises(ConfigurationError, match="Ownership conflict"):
+            run(board, project, recover=True, preview=preview)
+    assert project.writes == [] and not path.exists()
 
 
 @pytest.mark.parametrize("last_page", [
@@ -1033,16 +1154,11 @@ def test_review_expires_when_item_evidence_changes(tmp_path, monkeypatch, change
     assert current["review_token"] != token and current["unreviewed_item_ids"] == [item_id]
 
 
-@pytest.mark.parametrize("legacy", [True, False])
-def test_marker_binding_preserves_edit_after_final_draft_read(tmp_path, monkeypatch, legacy):
+def test_new_draft_marker_binding_preserves_edit_after_final_draft_read(tmp_path, monkeypatch):
     board = tmp_path / "_kanban.md"
     board_at(board, "## TODO\n* [ ] Task\n")
     project = Project()
     path = tmp_path / ".kanban.json"
-    if legacy:
-        item_id = project.create_draft_issue("project", "Task", "Original notes")
-        path.write_text(json.dumps({"board_key": KEY, "tasks": {"Task": {"item_id": item_id,
-                                                                          "status": "Todo"}}}))
     query = project._query
 
     def edit_before_marker_write(document, variables):
@@ -1069,7 +1185,7 @@ def test_old_sidecar_upgrades_only_on_apply(tmp_path):
     path.write_bytes(original)
     run(board, project, recover=True, preview=True)
     assert path.read_bytes() == original
-    run(board, project)
+    run(board, project, recover=True)
     assert json.loads(path.read_bytes())["schema_version"] == 2
     assert project.items[0]["body"] == "Shared notes"
 
@@ -1283,7 +1399,8 @@ def test_cr_only_legacy_board_keeps_present_task_and_line_endings(tmp_path):
     assert preview["pending_legacy_claims"] == {item_id: "Present"}
     run(board, project, recover=True, review_token=preview["review_token"], confirmed_legacy_item_ids=[item_id])
     assert project.items[0]["body"] == ""
-    run(board, project)
+    with pytest.raises(ConfigurationError, match="binding pending"):
+        run(board, project)
     assert not project.items[0]["archived"]
     assert board.read_bytes() == keyed
     assert run(board, project, recover=True, preview=True)["owned"] == {"Present": item_id}
@@ -1325,7 +1442,7 @@ def test_legacy_migration_preserves_edit_during_inventory(tmp_path, monkeypatch)
         return snapshot
 
     monkeypatch.setattr(project, "get_project_items", edit_draft)
-    with pytest.raises(ConfigurationError, match="(?i)item-0.*changed"):
+    with pytest.raises(ConfigurationError, match="binding pending for item-0"):
         run(board, project)
     assert project.items[0]["body"] == "Notes\n\nNew paragraph"
     assert path.read_bytes() == before and project.writes == []

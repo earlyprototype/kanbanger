@@ -301,8 +301,8 @@ def test_mcp_preview_rejects_copied_board_state(tmp_path, monkeypatch):
     assert payload["error_code"] == "board_key_mismatch"
 
 
-def test_sync_migrates_legacy_ids_and_executes_local_plan(tmp_path, monkeypatch):
-    """Fetch both pages and mark the two known drafts before applying the plan."""
+def test_sync_executes_local_plan_after_operator_binds_legacy_ids(tmp_path, monkeypatch):
+    """Reserve both legacy IDs across pages until the operator binds the drafts."""
     board_path = tmp_path / "_kanban.md"
     board_path.write_text(
         KEYED_HEADER + "\n## TODO\n* [ ] New\n\n## REVIEW\n* [ ] Moved\n",
@@ -404,9 +404,15 @@ def test_sync_migrates_legacy_ids_and_executes_local_plan(tmp_path, monkeypatch)
         raise AssertionError(query)
 
     monkeypatch.setattr("requests.post", fake_post)
-    Syncer(LocalBoard(str(board_path)), StateManager(str(board_path)), GitHubClient("token")).sync(
-        "owner/repo", 8
-    )
+    syncer = Syncer(LocalBoard(str(board_path)), StateManager(str(board_path)), GitHubClient("token"))
+    with pytest.raises(ConfigurationError, match="binding pending for PVTI_moved, PVTI_removed"):
+        syncer.sync("owner/repo", 8)
+    preview = syncer.sync("owner/repo", 8, recover=True, preview=True)
+    assert [op["title"] for op in preview["plan"]["operations"]] == ["New"]
+    assert not any("mutation" in call["query"] for call in calls)
+    for title in ("Moved", "Removed"):
+        bodies[title] += "\n" + preview["pending_legacy_bindings"]["PVTI_" + title.lower()]
+    syncer.sync("owner/repo", 8)
 
     saved = StateManager(str(board_path)).load()["tasks"]
     assert saved["New"]["status"] == "Todo"
@@ -477,7 +483,7 @@ def test_archive_failure_keeps_state_for_retry(tmp_path):
     state = StateManager(str(board_path))
     state.state["board_key"] = "a" * 32
     state.state["tasks"] = {
-        "Removed": {"item_id": "PVTI_removed", "status": "Done"}
+        "Removed": {"item_id": "PVTI_removed", "status": "Done", "marked": True}
     }
     state.save()
 
@@ -492,12 +498,9 @@ def test_archive_failure_keeps_state_for_retry(tmp_path):
 
         @staticmethod
         def get_project_items(project_id):
-            return [dict(id="PVTI_removed", draft_id="draft", title="Removed", body="",
+            return [dict(id="PVTI_removed", draft_id="draft", title="Removed",
+                         body=f"<!-- kanbanger:item:v2 {'a' * 32} 52656d6f766564 PVTI_removed -->",
                          archived=False, status="Done")]
-
-        @staticmethod
-        def mark_draft(project_id, item_id, title, expected, marker):
-            assert item_id == "PVTI_removed"
 
         @staticmethod
         def verify_owned_draft(item_id, board_key, title):

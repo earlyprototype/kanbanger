@@ -33,15 +33,22 @@ def item_marker(board_key: str, title: str, item_id: str | None = None) -> str:
     return f"{_PREFIX}v2 {key} {item_id} -->"
 
 
-def _read_marker(body: str):
+def _read_marker(body: str, *, bound=None):
     if _PREFIX not in body:
         return None
     claims = _CLAIM.findall(body)
     if not claims:
         return None
+    if len(claims) > 1:
+        raise OwnershipConflict("invalid or multiple ownership markers")
+    if bound:
+        owner, title, _ = bound
+        provisional = item_marker(owner, title)
+        if any(line.strip(" \t\r") == provisional for line in body.split("\n")):
+            return owner, title, None
     footer = body.rstrip().rsplit("\n", 1)[-1]
     match = _MARKER.fullmatch(footer)
-    if match and len(claims) == 1:
+    if match:
         version, board_key, encoded, item_id = match.groups()
         try:
             title = bytes.fromhex(encoded).decode("utf-8")
@@ -56,12 +63,12 @@ def _read_marker(body: str):
 
 def read_item_marker(body, provenance):
     """Reconcile legacy body comments with the dedicated Project text field."""
-    comment = _read_marker(body)
     if provenance is None:
-        return comment
+        return _read_marker(body)
     bound = _read_marker(provenance)
     if not bound or bound[2] is None or provenance != item_marker(*bound):
         raise OwnershipConflict("invalid Project provenance field")
+    comment = _read_marker(body, bound=bound)
     owner, title, _ = bound
     if comment and comment not in (bound, (owner, title, None)):
         raise OwnershipConflict("Project provenance and draft comment disagree")
@@ -148,7 +155,7 @@ def inspect_drafts(items, board_key, stored, local, *, recover, sidecar_bound):
             continue
         seen.add(item_id)
         if bound_id is None:
-            result.legacy[title] = item
+            result.legacy[title] = item_id
         record = dict(stored.get(title, {}), item_id=item_id)
         if recover or record.get("recovered") or title not in stored:
             record["status"] = item["status"]
