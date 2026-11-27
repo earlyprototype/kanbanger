@@ -302,20 +302,13 @@ def test_mcp_preview_rejects_copied_board_state(tmp_path, monkeypatch):
     assert payload["error_code"] == "board_key_mismatch"
 
 
-def test_sync_executes_local_plan_without_remote_reconciliation(tmp_path, monkeypatch):
-    """A remote fetch must not decide what local state creates, moves, or archives."""
-    board_path = tmp_path / "_kanban.md"
-    board_path.write_text(
-        "# Board\n\n## TODO\n* [ ] New\n\n## REVIEW\n* [ ] Moved\n",
-        encoding="utf-8",
-    )
-    state = StateManager(str(board_path))
-    state.state["tasks"] = {
-        "Moved": {"item_id": "PVTI_moved", "status": "InProgress"},
-        "Removed": {"item_id": "PVTI_removed", "status": "Done"},
-    }
-    state.save()
+@pytest.fixture
+def project_graphql(monkeypatch):
+    """Simulate GitHub at the HTTP boundary and record the requests."""
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    monkeypatch.setenv("GITHUB_REPO", "owner/repo")
     calls = []
+    converted_items = set()
 
     class Response:
         status_code = 200
@@ -332,6 +325,7 @@ def test_sync_executes_local_plan_without_remote_reconciliation(tmp_path, monkey
         query = json["query"]
         variables = json["variables"]
         if "repository(owner" in query:
+            assert variables == {"owner": "owner", "repo": "repo"}
             return Response({"data": {"repository": {
                 "id": "R_repo",
                 "projectsV2": {"nodes": [{
@@ -358,13 +352,39 @@ def test_sync_executes_local_plan_without_remote_reconciliation(tmp_path, monkey
                 "projectV2Item": {"id": variables["itemId"]}
             }}})
         if "archiveProjectV2Item" in query:
-            assert variables == {"projectId": "PVT_project", "itemId": "PVTI_removed"}
             return Response({"data": {"archiveProjectV2Item": {
-                "item": {"id": "PVTI_removed"}
+                "item": {"id": variables["itemId"]}
+            }}})
+        if "convertProjectV2DraftIssueItemToIssue" in query:
+            item_id = variables["itemId"]
+            if item_id in converted_items:
+                return Response({"errors": [{"message": "Item is already an Issue"}]})
+            converted_items.add(item_id)
+            return Response({"data": {"convertProjectV2DraftIssueItemToIssue": {
+                "item": {"id": "PVTI_new", "content": {
+                    "number": 42, "url": "https://github.com/owner/repo/issues/42"
+                }}
             }}})
         raise AssertionError("remote reconciliation is not part of the sync plan")
 
     monkeypatch.setattr("requests.post", fake_post)
+    return calls
+
+
+def test_sync_executes_local_plan_without_remote_reconciliation(tmp_path, project_graphql):
+    """A remote fetch must not decide what local state creates, moves, or archives."""
+    board_path = tmp_path / "_kanban.md"
+    board_path.write_text(
+        "# Board\n\n## TODO\n* [ ] New\n\n## REVIEW\n* [ ] Moved\n",
+        encoding="utf-8",
+    )
+    state = StateManager(str(board_path))
+    state.state["tasks"] = {
+        "Moved": {"item_id": "PVTI_moved", "status": "InProgress"},
+        "Removed": {"item_id": "PVTI_removed", "status": "Done"},
+    }
+    state.save()
+    calls = project_graphql
     Syncer(LocalBoard(str(board_path)), StateManager(str(board_path)), GitHubClient("token")).sync(
         "owner/repo", 8
     )
@@ -373,6 +393,9 @@ def test_sync_executes_local_plan_without_remote_reconciliation(tmp_path, monkey
     assert saved["New"]["status"] == "Todo"
     assert saved["Moved"]["status"] == "Review"
     assert "Removed" not in saved
+    assert [c["variables"] for c in calls if "archiveProjectV2Item" in c["query"]] == [
+        {"projectId": "PVT_project", "itemId": "PVTI_removed"}
+    ]
     update_vars = [
         call["variables"] for call in calls
         if "updateProjectV2ItemFieldValue" in call["query"]
@@ -381,6 +404,143 @@ def test_sync_executes_local_plan_without_remote_reconciliation(tmp_path, monkey
         {"projectId": "PVT_project", "itemId": "PVTI_new", "fieldId": "PVTSSF_status", "optionId": "opt_todo"},
         {"projectId": "PVT_project", "itemId": "PVTI_moved", "fieldId": "PVTSSF_status", "optionId": "opt_review"},
     ]
+
+
+def test_explicit_conversion_preserves_item_for_move_and_archive(
+    kanban_workspace, registered_tools, project_graphql
+):
+    board = kanban_workspace / "_kanban.md"
+    state = StateManager(str(board))
+    syncer = Syncer(LocalBoard(str(board)), state, GitHubClient("test-token"))
+    registered_tools["add_task"]("New")
+    syncer.sync("owner/repo", 8)
+    assert not any("convertProject" in c["query"] for c in project_graphql)
+    original = state.state_file.read_bytes()
+    project_graphql.clear()
+
+    result = json.loads(registered_tools["convert_task_to_issue"]("New"))
+    assert result == {
+        "success": True, "item_id": "PVTI_new", "issue_number": 42,
+        "issue_url": "https://github.com/owner/repo/issues/42",
+    }
+    lookup, conversion = project_graphql
+    assert "repository(owner" in lookup["query"]
+    mutation = " ".join(conversion["query"].split())
+    assert "convertProjectV2DraftIssueItemToIssue" in mutation
+    assert "itemId: $itemId" in mutation and "repositoryId: $repositoryId" in mutation
+    assert "... on Issue { number url }" in mutation
+    assert conversion["variables"] == {"itemId": "PVTI_new", "repositoryId": "R_repo"}
+    assert state.state_file.read_bytes() == original
+
+    repeated = json.loads(registered_tools["convert_task_to_issue"]("New"))
+    assert repeated["success"] is False
+    assert repeated["error_code"] == "github_api_error"
+    assert state.state_file.read_bytes() == original
+
+    project_graphql.clear()
+    registered_tools["move_task"]("New", "TODO", "REVIEW")
+    syncer.sync("owner/repo", 8)
+    registered_tools["delete_task"]("New", "REVIEW")
+    syncer.sync("owner/repo", 8)
+    mutations = [c for c in project_graphql if "mutation" in c["query"]]
+    move, archive = mutations
+    assert "updateProjectV2ItemFieldValue" in move["query"]
+    assert move["variables"] == {
+        "projectId": "PVT_project", "itemId": "PVTI_new",
+        "fieldId": "PVTSSF_status", "optionId": "opt_review",
+    }
+    assert "archiveProjectV2Item" in archive["query"]
+    assert archive["variables"] == {"projectId": "PVT_project", "itemId": "PVTI_new"}
+    assert state.load()["tasks"] == {}
+
+
+@pytest.mark.parametrize(("saved", "error_code"), [
+    (None, "configuration_error"),
+    (b"{", "configuration_error"),
+    (b'{"tasks":{"New":{"status":"Todo"}}}', "configuration_error"),
+    (b'{"tasks":{}, "repo_node_id":"R_repo"}', "task_not_found"),
+])
+def test_conversion_refuses_missing_corrupt_or_untracked_state(
+    kanban_workspace, registered_tools, project_graphql, saved, error_code
+):
+    registered_tools["add_task"]("New")
+    path = kanban_workspace / ".kanban.json"
+    if saved is not None:
+        path.write_bytes(saved)
+    result = json.loads(registered_tools["convert_task_to_issue"]("New"))
+    assert result["success"] is False
+    assert result["error_code"] == error_code
+    assert project_graphql == []
+    assert (path.read_bytes() if path.exists() else None) == saved
+    assert list(kanban_workspace.glob(".kanban.json.corrupt-*")) == []
+
+
+@pytest.mark.parametrize("repo_id", [None, "", "R_other"])
+def test_conversion_refuses_unbound_or_mismatched_repository(
+    kanban_workspace, registered_tools, project_graphql, repo_id
+):
+    registered_tools["add_task"]("New")
+    saved = {"tasks": {"New": {"item_id": "PVTI_new", "status": "Todo"}}}
+    if repo_id is not None:
+        saved["repo_node_id"] = repo_id
+    path = kanban_workspace / ".kanban.json"
+    original = json.dumps(saved).encode()
+    path.write_bytes(original)
+    result = json.loads(registered_tools["convert_task_to_issue"]("New"))
+    assert result["success"] is False
+    assert result["error_code"] == "configuration_error"
+    if repo_id:
+        lookup, = project_graphql
+        assert "repository(owner" in lookup["query"]
+    else:
+        assert project_graphql == []
+        assert "sync_to_github(dry_run=True)" in result["message"]
+        assert "sync_to_github()" in result["message"]
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("saved_repo", [None, "R_original"])
+def test_sync_binds_legacy_state_but_preserves_an_existing_repository_binding(
+    kanban_workspace, registered_tools, project_graphql, saved_repo
+):
+    registered_tools["add_task"]("New")
+    board = kanban_workspace / "_kanban.md"
+    state = StateManager(str(board))
+    state.update_task("New", "PVTI_new", "Todo")
+    state.set_project_info(saved_repo, "PVT_project")
+    state.save()
+    before = state.state_file.read_bytes()
+    syncer = Syncer(LocalBoard(str(board)), state, GitHubClient("test-token"))
+    if saved_repo is None:
+        syncer.sync("owner/repo", 8)
+        assert state.load()["repo_node_id"] == "R_repo"
+        assert json.loads(registered_tools["convert_task_to_issue"]("New"))["success"]
+    else:
+        with pytest.raises(ConfigurationError, match="repository"):
+            syncer.sync("owner/repo", 8)
+        result = json.loads(registered_tools["convert_task_to_issue"]("New"))
+        assert result["success"] is False
+        assert state.state_file.read_bytes() == before
+        assert all("mutation" not in c["query"] for c in project_graphql)
+
+
+def test_legacy_sync_refuses_to_bind_tracked_items_through_a_different_project(
+    kanban_workspace, registered_tools, project_graphql
+):
+    registered_tools["add_task"]("New")
+    board = kanban_workspace / "_kanban.md"
+    state = StateManager(str(board))
+    state.update_task("New", "PVTI_new", "Todo")
+    state.state["project_id"] = "PVT_original"
+    state.save()
+    before = state.state_file.read_bytes()
+
+    syncer = Syncer(LocalBoard(str(board)), state, GitHubClient("test-token"))
+    with pytest.raises(ConfigurationError, match="Project"):
+        syncer.sync("owner/repo", 8)
+    assert state.state_file.read_bytes() == before
+    lookup, = project_graphql
+    assert "repository(owner" in lookup["query"]
 
 
 def test_created_item_is_durable_before_initial_status_failure(tmp_path):

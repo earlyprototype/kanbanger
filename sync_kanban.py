@@ -77,6 +77,13 @@ class ConfigurationError(KanbangerError):
     path, or runtime dependency."""
 
 
+def _split_repository(repo: str) -> tuple[str, str]:
+    parts = repo.split('/')
+    if len(parts) != 2 or not all(parts):
+        raise ConfigurationError("GITHUB_REPO must be 'owner/repo'")
+    return parts[0], parts[1]
+
+
 def build_sync_plan(
     local_flat: dict[str, str], state_tasks: dict[str, dict]
 ) -> dict:
@@ -416,8 +423,25 @@ class StateManager:
         if task_title in self.state["tasks"]:
             del self.state["tasks"][task_title]
     
+    def verify_repository(self, repo_node_id: str) -> None:
+        """Keep tracked item IDs bound to their original repository."""
+        saved_id = self.state.get("repo_node_id")
+        if self.state["tasks"] and saved_id and saved_id != repo_node_id:
+            raise ConfigurationError(
+                "The configured repository differs from the one recorded in "
+                ".kanban.json. Use the repository that owns this sync state."
+            )
+
     def set_project_info(self, repo_node_id: str, project_id: str):
         """Set the repository and project IDs."""
+        self.verify_repository(repo_node_id)
+        if self.state["tasks"] and not self.state.get("repo_node_id"):
+            saved_project = self.state.get("project_id")
+            if saved_project and saved_project != project_id:
+                raise ConfigurationError(
+                    "Cannot bind tracked items to a repository through a different "
+                    "Project. Select the Project recorded in .kanban.json."
+                )
         self.state["repo_node_id"] = repo_node_id
         self.state["project_id"] = project_id
 
@@ -472,6 +496,23 @@ class GitHubClient:
         
         return data
     
+    def get_repository_id(self, repo: str) -> str:
+        """Resolve the configured repository without enumerating Project items."""
+        owner, name = _split_repository(repo)
+        query = """
+        query($owner: String!, $repo: String!) {
+            repository(owner: $owner, name: $repo) { id }
+        }
+        """
+        result = self._query(query, {"owner": owner, "repo": name})
+        try:
+            repo_id = result["data"]["repository"]["id"]
+        except (KeyError, TypeError) as exc:
+            raise GitHubAPIError(f"Could not resolve repository {repo}") from exc
+        if not isinstance(repo_id, str) or not repo_id.strip():
+            raise GitHubAPIError(f"GitHub returned no repository ID for {repo}")
+        return repo_id
+
     def get_repo_project(self, owner: str, repo_name: str, project_number: Optional[int] = None) -> Tuple[str, str, str, Dict]:
         """
         Get project information via repository lookup.
@@ -637,6 +678,33 @@ class GitHubClient:
         data = self._query(mutation, variables)
         return data["data"]["addProjectV2DraftIssue"]["projectItem"]["id"]
     
+    def convert_draft_to_issue(self, item_id: str, repo_id: str) -> tuple[int, str]:
+        """Convert the tracked Project item and return its Issue number and URL."""
+        mutation = """
+        mutation($itemId: ID!, $repositoryId: ID!) {
+            convertProjectV2DraftIssueItemToIssue(input: {
+                itemId: $itemId, repositoryId: $repositoryId
+            }) {
+                item {
+                    id
+                    content { ... on Issue { number url } }
+                }
+            }
+        }
+        """
+        result = self._query(mutation, {"itemId": item_id, "repositoryId": repo_id})
+        try:
+            item = result["data"]["convertProjectV2DraftIssueItemToIssue"]["item"]
+            returned_id = item["id"]
+            number = item["content"]["number"]
+            url = item["content"]["url"]
+        except (KeyError, TypeError) as exc:
+            raise GitHubAPIError("GitHub did not confirm the converted Issue") from exc
+        if (returned_id != item_id or type(number) is not int
+                or not isinstance(url, str) or not url):
+            raise GitHubAPIError("GitHub did not confirm the Issue for the tracked item")
+        return number, url
+
     def update_item_status(self, project_id: str, item_id: str, status_field_id: str, status_option_id: str):
         """Update the status field of a project item."""
         mutation = """
@@ -695,10 +763,7 @@ class Syncer:
     
     def sync(self, repo: str, project_number: Optional[int] = None):
         """Perform the full synchronization."""
-        parts = repo.split('/')
-        if len(parts) != 2 or not all(parts):
-            raise ConfigurationError("GITHUB_REPO must be 'owner/repo'")
-        owner, repo_name = parts
+        owner, repo_name = _split_repository(repo)
         
         print(f"Parsing {self.board.file_path}...")
         local_tasks = self.board.parse()

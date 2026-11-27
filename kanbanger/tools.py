@@ -22,6 +22,7 @@ from kanban_doctor import render_report, run_doctor
 from kanban_io import (
     atomic_write_text,
     discover_columns,
+    extract_board_key,
     kanban_lock,
     parse_task_title_with_description as _parse_task_title_with_description,
 )
@@ -945,6 +946,61 @@ def register_tools(server: FastMCP):
             stdout=stdout,
         )
     
+    @server.tool()
+    def convert_task_to_issue(title: str) -> str:
+        """Permanently convert one tracked Project draft to an Issue in GITHUB_REPO.
+
+        Use only on explicit request. Pass the exact tracked title shown by
+        get_sync_status(). Returns item_id, issue_number and issue_url.
+        """
+        from sync_kanban import ConfigurationError, GitHubAPIError, GitHubClient, StateManager
+
+        state = StateManager(get_kanban_path())
+        try:
+            board_text = state.kanban_file.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return _error(ERROR_KANBAN_NOT_FOUND, f"Board not found at {state.kanban_file}")
+        except (OSError, UnicodeError) as exc:
+            return _error(ERROR_READ_FAILED, f"Could not read the board: {exc}")
+        try:
+            if not state.state_file.is_file():
+                return _error(ERROR_CONFIGURATION, "Conversion requires an existing .kanban.json.")
+            saved = state.load(read_only=True)
+        except (OSError, ConfigurationError) as exc:
+            return _error(ERROR_CONFIGURATION, str(exc))
+        try:
+            state.verify_board_key(extract_board_key(board_text))
+        except ConfigurationError as exc:
+            return _error(ERROR_BOARD_KEY_MISMATCH, str(exc))
+
+        item_id = state.get_item_id(title)
+        if item_id is None:
+            return _error(ERROR_TASK_NOT_FOUND, f"No tracked Project item for '{title}'.")
+        saved_repo_id = saved.get("repo_node_id")
+        if not saved_repo_id:
+            return _error(
+                ERROR_CONFIGURATION,
+                "Sync state has no repository ID. Preview with sync_to_github(dry_run=True), "
+                "then run sync_to_github() to bind the repository before converting.",
+            )
+
+        token = os.getenv("GITHUB_TOKEN")
+        if not token:
+            return _error(ERROR_MISSING_GITHUB_TOKEN, "GITHUB_TOKEN environment variable not set.")
+        repo = os.getenv("GITHUB_REPO")
+        if not repo:
+            return _error(ERROR_MISSING_GITHUB_REPO, "GITHUB_REPO environment variable not set.")
+        try:
+            client = GitHubClient(token)
+            repo_id = client.get_repository_id(repo)
+            state.verify_repository(repo_id)
+            number, url = client.convert_draft_to_issue(item_id, repo_id)
+        except ConfigurationError as exc:
+            return _error(ERROR_CONFIGURATION, str(exc))
+        except GitHubAPIError as exc:
+            return _error(ERROR_GITHUB_API, str(exc))
+        return _ok(item_id=item_id, issue_number=number, issue_url=url)
+
     @server.tool()
     def get_sync_status() -> str:
         """

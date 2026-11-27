@@ -246,6 +246,7 @@ Your AI assistant gets these **tools**:
 | `reject_review(title, reason)` | Send a REVIEW task back with feedback |
 | `doctor(network?)` | Health-check the workspace binding, board file, and sync config |
 | `sync_to_github(dry_run?)` | Preview locally with `dry_run`; otherwise sync to GitHub |
+| `convert_task_to_issue(title)` | Permanently convert one tracked draft to an Issue in `GITHUB_REPO`. Use the exact title from `get_sync_status()`. Returns the Issue number and URL. |
 | `get_sync_status()` | Check sync state |
 
 These **resources** (always visible):

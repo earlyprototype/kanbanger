@@ -7,7 +7,7 @@ is the complementary proof that `create_server()` actually wires the full
 surface onto a real FastMCP instance — the part the stub cannot verify.
 
 Acceptance gate for the port: a real FastMCP server exposing exactly
-11 tools, 4 resources, and 5 prompts, by name. If the native SDK's
+12 tools, 4 resources, and 5 prompts, by name. If the native SDK's
 decorator API ever drifts, this fails loudly instead of silently
 dropping a capability.
 """
@@ -27,6 +27,7 @@ EXPECTED_TOOLS = {
     "delete_task",
     "list_tasks",
     "sync_to_github",
+    "convert_task_to_issue",
     "get_sync_status",
     "propose_done",
     "approve_done",
