@@ -18,13 +18,14 @@ intercepted the lookup and the target project's `.env` was never
 considered. `find_dotenv(usecwd=True)` makes the search start at
 `os.getcwd()` so the CWD-closest `.env` wins.
 
-Four complementary checks:
+Checks include:
   1. Importing the library leaves the process environment unchanged.
   2. A nested workspace inherits its nearest ancestor's .env.
   3. Behaviour-level (B5): a subprocess run shows the `.env` value
      winning over a shell-exported value of the same name.
   4. Behaviour-level (usecwd): a subprocess run shows a child-dir
      `.env` winning over a parent-of-source-dir `.env`.
+  5. A Unix workspace FIFO takes precedence over an ancestor's file.
 """
 
 from __future__ import annotations
@@ -34,6 +35,8 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
+
+import pytest
 
 
 def test_importing_sync_kanban_does_not_load_dotenv(tmp_path: Path):
@@ -65,7 +68,7 @@ def test_importing_sync_kanban_does_not_load_dotenv(tmp_path: Path):
 
 
 def test_workspace_inherits_nearest_dotenv(tmp_path: Path, monkeypatch):
-    from sync_kanban import sync_dotenv_overrides
+    from sync_kanban import _load_cli_dotenv
 
     monkeypatch.delenv("PYTHON_DOTENV_DISABLED", raising=False)
     workspace = tmp_path / "parent" / "board"
@@ -74,11 +77,42 @@ def test_workspace_inherits_nearest_dotenv(tmp_path: Path, monkeypatch):
     (workspace.parent / ".env").write_text(
         "GITHUB_REPO=nearest/project\nGITHUB_TOKEN=\n", encoding="utf-8"
     )
-    assert sync_dotenv_overrides(workspace) == {
-        "GITHUB_REPO": "nearest/project", "GITHUB_TOKEN": "",
-    }
+    monkeypatch.chdir(workspace)
+    monkeypatch.setenv("GITHUB_REPO", "shell/project")
+    monkeypatch.setenv("GITHUB_TOKEN", "shell-token")
+    _load_cli_dotenv()
+    assert os.environ["GITHUB_REPO"] == "nearest/project"
+    assert os.environ["GITHUB_TOKEN"] == ""
     monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "true")
-    assert sync_dotenv_overrides(workspace) == {}
+    monkeypatch.setenv("GITHUB_REPO", "shell/project")
+    _load_cli_dotenv()
+    assert os.environ["GITHUB_REPO"] == "shell/project"
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires a Unix FIFO")
+def test_workspace_dotenv_fifo_wins_over_parent_file(tmp_path: Path, monkeypatch):
+    from sync_kanban import _load_cli_dotenv
+
+    workspace = tmp_path / "board"
+    workspace.mkdir()
+    (tmp_path / ".env").write_text("GITHUB_REPO=parent/project\n", encoding="utf-8")
+    os.mkfifo(workspace / ".env")
+    monkeypatch.chdir(workspace)
+    monkeypatch.delenv("PYTHON_DOTENV_DISABLED", raising=False)
+    monkeypatch.setenv("GITHUB_REPO", "shell/project")
+
+    # The writer waits for the worker to open the FIFO and closes it after one value.
+    writer = subprocess.Popen([
+        sys.executable, "-c",
+        "from pathlib import Path; Path('.env').write_text('GITHUB_REPO=board/project\\n')",
+    ])
+    try:
+        _load_cli_dotenv()
+        assert os.environ["GITHUB_REPO"] == "board/project"
+        assert writer.wait(timeout=5) == 0
+    finally:
+        writer.kill()
+        writer.wait()
 
 
 def test_cli_dotenv_override_actually_beats_shell_env(tmp_path: Path):

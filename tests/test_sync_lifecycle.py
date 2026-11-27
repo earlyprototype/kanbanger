@@ -523,7 +523,7 @@ def test_conversion_refuses_an_item_tracked_by_two_titles(
 
 
 @pytest.mark.parametrize("defect", [
-    "invalid_project", "unrelated_duplicate", "invalid_version", "future_version",
+    "invalid_project", "unrelated_duplicate", "invalid_version", "null_version", "future_version",
 ])
 def test_conversion_validates_the_whole_binding(
     kanban_workspace, registered_tools, project_graphql, defect
@@ -539,6 +539,8 @@ def test_conversion_validates_the_whole_binding(
         state.update_task("Third", "PVTI_shared", "Done")
     elif defect == "invalid_version":
         state.state["schema_version"] = True
+    elif defect == "null_version":
+        state.state["schema_version"] = None
     else:
         state.state["schema_version"] = 2
     state.save()
@@ -550,6 +552,67 @@ def test_conversion_validates_the_whole_binding(
     assert result["error_code"] == "configuration_error"
     assert project_graphql == []
     assert state.state_file.read_bytes() == before
+
+
+def test_conversion_accepts_legacy_state_without_schema_version(
+    kanban_workspace, registered_tools, project_graphql
+):
+    registered_tools["add_task"]("New")
+    state = StateManager(kanban_workspace / "_kanban.md")
+    state.set_project_info("R_repo", "PVT_project")
+    state.update_task("New", "PVTI_new", "Todo")
+    del state.state["schema_version"]
+    state.save()
+    before = state.state_file.read_bytes()
+
+    result = json.loads(convert_tracked_draft(state.kanban_file, "New"))
+
+    assert result["success"] is True
+    assert result["item_id"] == "PVTI_new"
+    assert state.state_file.read_bytes() == before
+
+
+@pytest.mark.parametrize("recorded_key", [None, "cd" * 16])
+def test_keyed_board_with_legacy_or_conflicting_state(
+    kanban_workspace, registered_tools, project_graphql, recorded_key
+):
+    board_key = "ab" * 16
+    board = kanban_workspace / "_kanban.md"
+    board.write_text(
+        f"<!-- kanbanger:board-id: {board_key} -->\n## TODO\n* [ ] New\n",
+        encoding="utf-8",
+    )
+    saved = {
+        "project_id": "PVT_project",
+        "tasks": {"New": {"item_id": "PVTI_new", "status": "Todo"}},
+    }
+    if recorded_key is not None:
+        saved["board_key"] = recorded_key
+    path = kanban_workspace / ".kanban.json"
+    original = json.dumps(saved).encode()
+    path.write_bytes(original)
+
+    result = json.loads(convert_tracked_draft(board, "New"))
+
+    assert result["success"] is False
+    assert project_graphql == []
+    assert path.read_bytes() == original
+    if recorded_key is not None:
+        assert result["error_code"] == "board_key_mismatch"
+        assert "sync_to_github()" not in result["message"]
+        return
+
+    assert result["error_code"] == "configuration_error"
+    message = result["message"]
+    assert message.index("sync_to_github(dry_run=True)") < message.index("sync_to_github()")
+    preview = json.loads(registered_tools["sync_to_github"](dry_run=True))
+    assert preview["success"] is True
+    assert path.read_bytes() == original
+    state = StateManager(board)
+    Syncer(LocalBoard(str(board)), state, GitHubClient("test-token")).sync("owner/repo", 8)
+    assert state.load()["board_key"] == board_key
+    assert state.state["repo_node_id"] == "R_repo"
+    assert json.loads(convert_tracked_draft(board, "New"))["success"] is True
 
 
 @pytest.mark.parametrize("change", [

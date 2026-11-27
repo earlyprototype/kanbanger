@@ -78,7 +78,7 @@ setup(
     py_modules=["sync_kanban", "kanban_io", "kanban_doctor"],
     install_requires=[
         "requests>=2.25.0",
-        "python-dotenv>=0.19.0",
+        "python-dotenv>=1.2.1",  # find_dotenv also recognises Unix FIFOs
         # Native MCP SDK (FastMCP) is a HARD runtime dependency, not optional:
         # the kanbanger-mcp console script (kanbanger.server:main) imports
         # `mcp.server.fastmcp` at module load, so a base `pip install .` must

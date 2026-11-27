@@ -22,34 +22,16 @@ from kanban_io import (
 )
 
 
-def sync_dotenv_overrides(workspace: Path) -> dict[str, str]:
-    """Return settings from the nearest .env at or above the workspace."""
-    if os.getenv("PYTHON_DOTENV_DISABLED", "").lower() in {"1", "true", "t", "yes", "y"}:
-        return {}
-    try:
-        from dotenv import dotenv_values
-    except ImportError:
-        return {}
-
-    for directory in (workspace, *workspace.parents):
-        path = directory / ".env"
-        if path.is_file():
-            try:
-                values = dotenv_values(path)
-            except (OSError, UnicodeError) as exc:
-                raise ConfigurationError(f"Could not read {path}: {exc}") from exc
-            # Windows environment keys are case-insensitive. Match os.environ
-            # when these overrides are applied to an ordinary dict in the MCP.
-            return {
-                (key.upper() if os.name == "nt" else key): value
-                for key, value in values.items() if value is not None
-            }
-    return {}
-
-
 def _load_cli_dotenv() -> None:
-    """Load the CLI cwd's `.env`, where project values override the shell."""
-    os.environ.update(sync_dotenv_overrides(Path.cwd()))
+    """Load the worker's nearest .env with workspace settings taking precedence."""
+    try:
+        from dotenv import find_dotenv, load_dotenv
+    except ImportError:
+        return
+    try:
+        load_dotenv(find_dotenv(usecwd=True), override=True)
+    except (OSError, UnicodeError) as exc:
+        raise ConfigurationError(f"Could not load workspace .env: {exc}") from exc
 
 
 # GitHub GraphQL endpoint
@@ -349,7 +331,9 @@ class StateManager:
             # schema_version; v0 and v1 are structurally identical, so
             # silently upgrade in-memory (next save persists the field).
             loaded_version = self.state.get("schema_version")
-            if loaded_version is None:
+            # Read-only checks must see an explicit null as stored. A normal
+            # sync still repairs it on the next save.
+            if "schema_version" not in self.state or (loaded_version is None and not read_only):
                 self.state["schema_version"] = SCHEMA_VERSION
             elif (
                 isinstance(loaded_version, (int, float))

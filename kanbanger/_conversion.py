@@ -48,7 +48,13 @@ def _read_target(board_path: Path, title: str) -> _Target:
     version = saved["schema_version"]
     if type(version) is not int or not 0 <= version <= SCHEMA_VERSION:
         raise ConfigurationError("Conversion requires a supported sync state schema version.")
-    if saved.get("board_key") != board.board_key:
+    saved_key = saved.get("board_key")
+    if saved_key is None and board.board_key is not None:
+        raise ConfigurationError(
+            "Sync state has no key for this board. Preview with sync_to_github(dry_run=True), "
+            "then run sync_to_github() to bind the board and repository before converting."
+        )
+    if saved_key != board.board_key:
         raise _Refusal(
             ERROR_BOARD_KEY_MISMATCH, "The board key differs from the one in .kanban.json."
         )
