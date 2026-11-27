@@ -15,8 +15,12 @@ if [ ! -f "_kanban.md" ]; then
     exit 1
 fi
 
-# Check if kanban has been synced
-if [ ! -f ".kanban.json" ]; then
+state_status=missing
+if [ -f ".kanban.json" ]; then
+    state_status=$(kanban-sync --check-state _kanban.md) || exit 1
+fi
+
+if [ "$state_status" = missing ]; then
     echo "⚠️  WARNING: Kanban has never been synced to GitHub"
     echo ""
     echo "Sync before committing:"
@@ -35,7 +39,7 @@ if [ ! -f ".kanban.json" ]; then
 fi
 
 # Check if kanban has unsaved changes (modified more recently than state file)
-if [ "_kanban.md" -nt ".kanban.json" ]; then
+if [ "$state_status" = stale ]; then
     echo "⚠️  WARNING: Kanban has unsaved changes!"
     echo ""
     echo "_kanban.md was modified after last sync."

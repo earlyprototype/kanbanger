@@ -27,10 +27,12 @@ the post-merge bug class alongside PRs #1 (override=True) and #2
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import sys
+import sysconfig
 import time
 from pathlib import Path
 
@@ -96,9 +98,20 @@ def _run_hook_without_tty(cwd: Path) -> subprocess.CompletedProcess:
     # boundary; line endings + execute bits stay intact via
     # shutil.copy2.
     shutil.copy2(HOOK_PATH, cwd / "pre-commit")
+    # Git may see only the packaged CLI from a pipx install. Its launcher
+    # knows its interpreter even when neither python nor python3 is on PATH.
+    hook_bin = cwd / "hook-bin"
+    hook_bin.mkdir()
+    launcher = (
+        shutil.which("kanban-sync", path=sysconfig.get_path("scripts"))
+        or shutil.which("kanban-sync")
+    )
+    assert launcher, "Install the package to exercise its kanban-sync entry point"
+    shutil.copy2(launcher, hook_bin)
     return subprocess.run(
         [bash, "pre-commit"],
         cwd=str(cwd),
+        env={**os.environ, "PATH": str(hook_bin), "GITHUB_PROJECT_NUMBER": "unused"},
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
@@ -160,6 +173,36 @@ def test_hook_file_exists():
         f"pre-commit hook not found at {HOOK_PATH}; tests below assume "
         f"its location and will spuriously fail without it."
     )
+
+
+def test_non_tty_pending_create_blocks_commit_despite_newer_state(tmp_path):
+    board = tmp_path / "_kanban.md"
+    board.write_text("## TODO\n* [ ] New\n", encoding="utf-8")
+    os.utime(board, (1, 1))
+    state = tmp_path / ".kanban.json"
+    state.write_text(json.dumps({
+        "tasks": {}, "project_id": "project",
+        "pending_create": {"title": "New", "token": "a" * 32},
+    }), encoding="utf-8")
+
+    result = _run_hook_without_tty(tmp_path)
+    assert result.returncode != 0
+    output = result.stdout + result.stderr
+    assert "pending create" in output.lower()
+    assert "kanban-sync" in output
+    assert "Kanban check passed" not in output
+
+
+def test_hook_accepts_synced_task_named_pending_create_with_only_packaged_cli(tmp_path):
+    board = tmp_path / "_kanban.md"
+    board.write_text("## TODO\n* [ ] pending_create\n", encoding="utf-8")
+    os.utime(board, (1, 1))
+    (tmp_path / ".kanban.json").write_text(json.dumps({
+        "tasks": {"pending_create": {"item_id": "card-1", "status": "Todo"}},
+    }), encoding="utf-8")
+
+    result = _run_hook_without_tty(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_non_tty_never_synced_blocks_commit_without_hanging(

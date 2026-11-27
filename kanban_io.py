@@ -16,6 +16,7 @@ Audit-driven foundation for tools.py mutations:
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -31,8 +32,8 @@ from typing import Iterator, Optional, Tuple
 _LOCK_FILENAME = ".kanban.lock"
 _STATE_FILENAME = ".kanban.json"
 _KANBAN_FILENAME = "_kanban.md"
-_WINDOWS_REPLACE_ATTEMPTS = 5
-_WINDOWS_REPLACE_RETRY_DELAY_SECONDS = 0.05
+_WINDOWS_FILE_ATTEMPTS = 5
+_WINDOWS_FILE_RETRY_DELAY_SECONDS = 0.05
 
 
 # ---------------------------------------------------------------------------
@@ -241,11 +242,29 @@ def parse_task_title_with_description(
     return title, None
 
 
+def _retry_windows_file_operation(operation, *paths):
+    """Allow ordinary Windows readers up to 200 ms to release the file."""
+    for attempt in range(_WINDOWS_FILE_ATTEMPTS):
+        try:
+            return operation(*paths)
+        except PermissionError:
+            if sys.platform != "win32" or attempt == _WINDOWS_FILE_ATTEMPTS - 1:
+                raise
+            time.sleep(_WINDOWS_FILE_RETRY_DELAY_SECONDS)
+
+
+def unlink_with_retry(path: Path) -> None:
+    """Remove a file, retrying transient Windows sharing failures."""
+    _retry_windows_file_operation(os.unlink, path)
+
+
 def atomic_write_text(
     path: str,
     content: str,
     encoding: str = "utf-8",
     newline: Optional[str] = None,
+    *,
+    mtime_ns: Optional[int] = None,
 ) -> None:
     """Write text to path atomically.
 
@@ -264,27 +283,31 @@ def atomic_write_text(
     preserved byte-for-byte (e.g. the board-key mint into an existing
     board, ADR 0002).
     """
+    with _atomic_writer(path, "w", mtime_ns, encoding=encoding, newline=newline) as f:
+        f.write(content)
+
+
+def atomic_write_bytes(path: Path, content: bytes, *, mtime_ns: int) -> None:
+    """Restore the exact contents and modification time of a checkpoint."""
+    with _atomic_writer(path, "wb", mtime_ns) as f:
+        f.write(content)
+
+
+@contextmanager
+def _atomic_writer(path, mode, mtime_ns, **open_options):
     target_dir = os.path.dirname(os.path.abspath(path)) or "."
     fd, tmp_path = tempfile.mkstemp(
         prefix=os.path.basename(path) + ".tmp.",
         dir=target_dir,
     )
     try:
-        with os.fdopen(fd, "w", encoding=encoding, newline=newline) as f:
-            f.write(content)
+        with os.fdopen(fd, mode, **open_options) as f:
+            yield f
             f.flush()
             os.fsync(f.fileno())
-        for attempt in range(_WINDOWS_REPLACE_ATTEMPTS):
-            try:
-                os.replace(tmp_path, path)
-                break
-            except PermissionError:
-                if (
-                    sys.platform != "win32"
-                    or attempt == _WINDOWS_REPLACE_ATTEMPTS - 1
-                ):
-                    raise
-                time.sleep(_WINDOWS_REPLACE_RETRY_DELAY_SECONDS)
+        if mtime_ns is not None:
+            os.utime(tmp_path, ns=(os.stat(tmp_path).st_atime_ns, mtime_ns))
+        _retry_windows_file_operation(os.replace, tmp_path, path)
     except Exception:
         try:
             os.unlink(tmp_path)
@@ -293,9 +316,11 @@ def atomic_write_text(
         raise
 
 
-def atomic_write_json(path: str, data: object, indent: int = 2) -> None:
+def atomic_write_json(
+    path: str, data: object, indent: int = 2, *, mtime_ns: Optional[int] = None
+) -> None:
     """Atomic-write JSON. Same guarantees as atomic_write_text."""
-    atomic_write_text(path, json.dumps(data, indent=indent))
+    atomic_write_text(path, json.dumps(data, indent=indent), mtime_ns=mtime_ns)
 
 
 def _lock_path(workspace: str) -> str:
@@ -315,8 +340,8 @@ def kanban_lock(workspace: str) -> Iterator[None]:
     created if absent and left in place after release (presence is
     harmless and avoids race-on-creation between contenders).
 
-    Used to serialize mutations in tools.py and StateManager.save() in
-    sync_kanban.py so concurrent writers can't interleave a lost-update.
+    Board edits and sync runs use this same lock, so each writer can read
+    the preceding writer's changes before planning its own.
     Atomic writes (R1) protect against torn writes; the lock (R2)
     protects against lost updates.
     """
@@ -329,13 +354,15 @@ def kanban_lock(workspace: str) -> Iterator[None]:
     try:
         if sys.platform == "win32":
             import msvcrt
-            # Lock 1 byte at offset 0; LK_LOCK blocks until acquired.
-            # msvcrt.locking requires a non-empty file region, so write a
-            # placeholder byte if the file is empty.
-            if os.fstat(fd).st_size == 0:
-                os.write(fd, b"\0")
-                os.lseek(fd, 0, os.SEEK_SET)
-            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            # The region may extend past EOF, including on a new lock file.
+            # LK_LOCK reports EDEADLK after ten tries. A sync can take longer.
+            while True:
+                try:
+                    msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+                    break
+                except OSError as exc:
+                    if exc.errno != errno.EDEADLK:
+                        raise
             try:
                 yield
             finally:

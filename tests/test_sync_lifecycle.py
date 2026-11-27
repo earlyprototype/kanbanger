@@ -327,7 +327,7 @@ def test_sync_executes_local_plan_without_remote_reconciliation(tmp_path, monkey
         def json(self):
             return self.payload
 
-    def fake_post(url, *, headers, json, timeout=None):
+    def fake_post(url, *, headers, json, timeout=None, allow_redirects=True):
         calls.append(json)
         query = json["query"]
         variables = json["variables"]
@@ -347,8 +347,11 @@ def test_sync_executes_local_plan_without_remote_reconciliation(tmp_path, monkey
                 }]},
             }}})
         if "addProjectV2DraftIssue" in query:
+            pending = StateManager(str(board_path)).load()["pending_create"]
+            assert pending["title"] == "New"
             assert variables == {
-                "projectId": "PVT_project", "title": "New", "body": ""
+                "projectId": "PVT_project", "title": "New",
+                "body": f"<!-- kanbanger:create-id: {pending['token']} -->",
             }
             return Response({"data": {"addProjectV2DraftIssue": {
                 "projectItem": {"id": "PVTI_new"}
@@ -389,6 +392,8 @@ def test_created_item_is_durable_before_initial_status_failure(tmp_path):
     board_path.write_text(
         "# Board\n\n## TODO\n* [ ] New\n", encoding="utf-8"
     )
+    created = []
+    status_attempts = []
 
     class Client:
         @staticmethod
@@ -396,12 +401,15 @@ def test_created_item_is_durable_before_initial_status_failure(tmp_path):
             return "R_repo", "PVT_project", "PVTSSF_status", {"Todo": "opt_todo"}
 
         @staticmethod
-        def create_draft_issue(project_id, title):
+        def create_draft_issue(project_id, title, body):
+            created.append(title)
             return "PVTI_new"
 
         @staticmethod
-        def update_item_status(*args):
-            raise GitHubAPIError("status failed")
+        def update_item_status(project_id, item_id, field_id, option_id):
+            status_attempts.append((item_id, option_id))
+            if len(status_attempts) == 1:
+                raise GitHubAPIError("status failed")
 
     with pytest.raises(GitHubAPIError, match="status failed"):
         Syncer(
@@ -417,6 +425,15 @@ def test_created_item_is_durable_before_initial_status_failure(tmp_path):
         "to_status": "Todo",
         "item_id": "PVTI_new",
     }]
+
+    Syncer(
+        LocalBoard(str(board_path)), StateManager(str(board_path)), Client()
+    ).sync("owner/repo", 8)
+    assert created == ["New"]
+    assert status_attempts == [("PVTI_new", "opt_todo")] * 2
+    assert StateManager(str(board_path)).load()["tasks"] == {
+        "New": {"item_id": "PVTI_new", "status": "Todo"}
+    }
 
 
 def test_archive_failure_keeps_state_for_retry(tmp_path):
@@ -465,9 +482,27 @@ def test_sync_status_resource_reads_task_state_like_the_tool(tmp_path, monkeypat
     resource = json.loads(server.resources["github_sync_status"]())
     tool = json.loads(server.tools["get_sync_status"]())
 
+    assert resource["synced"] is True
     assert resource["synced_tasks"] == tool["synced_tasks"] == 2
     assert resource["local_task_titles"] == tool["github_items"] == ["One", "Two"]
     assert resource["github_item_ids"] == tool["github_item_ids"] == ["PVTI_one", "PVTI_two"]
+
+
+def test_sync_status_resource_reports_unresolved_first_create(kanban_workspace):
+    from kanbanger.resources import register_resources
+    from tests.conftest import _StubMCPServer
+
+    (kanban_workspace / ".kanban.json").write_text(json.dumps({
+        "tasks": {}, "project_id": "project",
+        "pending_create": {"title": "New", "token": "a" * 32},
+    }), encoding="utf-8")
+    server = _StubMCPServer()
+    register_resources(server)
+    status = json.loads(server.resources["github_sync_status"]())
+
+    assert status["synced"] is False
+    assert status["synced_tasks"] == 0
+    assert "pending create" in status["message"].lower()
 
 
 def test_github_client_uses_a_finite_request_timeout(monkeypatch):
@@ -482,7 +517,7 @@ def test_github_client_uses_a_finite_request_timeout(monkeypatch):
         def json():
             return {"data": {}}
 
-    def fake_post(url, *, headers, json, timeout=None):
+    def fake_post(url, *, headers, json, timeout=None, allow_redirects=True):
         received.append(timeout)
         return Response()
 

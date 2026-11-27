@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Concurrent sync hooks for the same board now share one card binding per task.
+- Sync recovers a draft card after a lost create response or failed binding write. Ambiguous matches stop sync for operator reconciliation.
+
 ## [3.0.0] - 2026-07-07
 
 ### Changed

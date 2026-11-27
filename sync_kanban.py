@@ -8,16 +8,21 @@ import os
 import sys
 import json
 import shutil
+import ssl
 import argparse
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, Iterator, List, Optional, Set, Tuple
+from uuid import uuid4
 
 from kanban_io import (
+    atomic_write_bytes,
     atomic_write_json,
     kanban_lock,
     parse_task_title_with_description,
     read_board_key,
+    unlink_with_retry,
 )
 
 # Load environment variables from .env file if it exists.
@@ -68,6 +73,14 @@ class GitHubAPIError(KanbangerError):
     promised."""
 
 
+class GitHubRequestNotExecuted(GitHubAPIError):
+    """The request failed before GitHub could apply the mutation."""
+
+
+class GitHubRequestNotSent(GitHubRequestNotExecuted):
+    """The connection failed before the request could reach GitHub."""
+
+
 class ProjectNotFoundError(KanbangerError):
     """No GitHub Project matched the requested repo/number."""
 
@@ -75,6 +88,10 @@ class ProjectNotFoundError(KanbangerError):
 class ConfigurationError(KanbangerError):
     """Required configuration is missing or invalid: env var, file
     path, or runtime dependency."""
+
+
+def _create_marker(token: str) -> str:
+    return f"<!-- kanbanger:create-id: {token} -->"
 
 
 def build_sync_plan(
@@ -226,7 +243,11 @@ class StateManager:
     def __init__(self, kanban_file_path: str):
         self.kanban_file = Path(kanban_file_path)
         self.state_file = self.kanban_file.parent / ".kanban.json"
-        self.state = {
+        self.state = self._empty_state()
+
+    @staticmethod
+    def _empty_state() -> Dict:
+        return {
             "schema_version": SCHEMA_VERSION,
             "repo_node_id": None,
             "project_id": None,
@@ -251,6 +272,7 @@ class StateManager:
                 f"Unable to read sync state: {self.state_file} ({exc})"
             ) from exc
         if state_exists:
+            loaded = None
             try:
                 with open(self.state_file, 'r', encoding='utf-8') as f:
                     loaded = json.load(f)
@@ -259,6 +281,19 @@ class StateManager:
                 tasks = loaded.get("tasks")
                 if not isinstance(tasks, dict):
                     raise ValueError("'tasks' is missing or not an object")
+                if "pending_create" in loaded:
+                    pending = loaded["pending_create"]
+                    if not (
+                        isinstance(pending, dict)
+                        and isinstance(pending.get("title"), str)
+                        and pending["title"]
+                        and pending["title"] not in tasks
+                        and isinstance(pending.get("token"), str)
+                        and re.fullmatch(r"[0-9a-f]{32}", pending["token"])
+                        and isinstance(loaded.get("project_id"), str)
+                        and loaded["project_id"]
+                    ):
+                        raise ValueError("invalid pending create record")
                 for task in tasks.values():
                     if not isinstance(task, dict):
                         raise ValueError("every task record must be an object")
@@ -283,6 +318,11 @@ class StateManager:
                     detail = f"{exc.msg} at line {exc.lineno} col {exc.colno}"
                 else:
                     detail = str(exc)
+                if isinstance(loaded, dict) and "pending_create" in loaded:
+                    raise ConfigurationError(
+                        f"Reconcile the pending create in {self.state_file} "
+                        f"before another CREATE ({detail})."
+                    ) from exc
                 if read_only:
                     raise ConfigurationError(
                         f"Sync state is corrupt: {self.state_file} "
@@ -309,13 +349,7 @@ class StateManager:
                     f"the board as never-synced.",
                     file=sys.stderr,
                 )
-                self.state = {
-                    "schema_version": SCHEMA_VERSION,
-                    "repo_node_id": None,
-                    "project_id": None,
-                    "board_key": None,
-                    "tasks": {},
-                }
+                self.state = self._empty_state()
                 return self.state
             self.state = loaded
             # R8: backwards-compat. Pre-R8 state files have no
@@ -335,21 +369,85 @@ class StateManager:
                     f"recognised; unknown fields are preserved on save.",
                     file=sys.stderr,
                 )
+        else:
+            self.state = self._empty_state()
         return self.state
+
+    def load_for_preview(self) -> None:
+        """A local preview cannot resolve the outcome of a pending CREATE."""
+        self.load(read_only=True)
+        if "pending_create" in self.state:
+            title = self.state["pending_create"]["title"]
+            raise ConfigurationError(
+                f"Run sync to recover the pending create for {title!r} "
+                "before previewing further changes."
+            )
+
+    def checkpoint_status(self) -> str:
+        """Read the intent and timestamp from the same checkpoint for pre-commit."""
+        try:
+            with self.state_file.open(encoding="utf-8") as checkpoint:
+                state = json.load(checkpoint)
+                mtime = os.fstat(checkpoint.fileno()).st_mtime_ns
+            if not isinstance(state, dict):
+                raise ValueError("expected a JSON object")
+            if "pending_create" in state:
+                raise ConfigurationError(
+                    f"Pending create. Run kanban-sync {self.kanban_file} "
+                    "to reconcile it before committing."
+                )
+            return "stale" if self.kanban_file.stat().st_mtime_ns > mtime else "current"
+        except (OSError, ValueError) as exc:
+            raise ConfigurationError(f"Cannot check kanban sync state: {exc}") from exc
     
     def save(self):
-        """Save state to .kanban.json. D1: atomic write under cross-process lock.
-
-        Atomic write (R1 pattern via kanban_io.atomic_write_json) protects
-        against torn state files; the workspace-relative lock (R2 pattern via
-        kanban_io.kanban_lock) serializes against tools.py mutations and any
-        concurrent sync writer. Together they form D1's transactional pair —
-        both kanban_io.atomic_write_text (markdown, in tools.py) and
-        atomic_write_json (state, here) write under the same lock file.
-        """
+        """Acquire the board lock and save the current state atomically."""
         workspace = str(self.kanban_file.parent)
         with kanban_lock(workspace):
-            atomic_write_json(str(self.state_file), self.state)
+            self.save_locked()
+
+    def save_locked(self):
+        """Checkpoint state while the caller holds the board lock."""
+        atomic_write_json(str(self.state_file), self.state)
+
+    def begin_create(self, title: str) -> str:
+        """Checkpoint the intent under the board lock before sending CREATE."""
+        token = uuid4().hex
+        self.state["pending_create"] = {"title": title, "token": token}
+        self.save_locked()
+        return _create_marker(token)
+
+    @contextmanager
+    def create_intent(self, title: str) -> Iterator[str]:
+        """Restore the previous checkpoint when CREATE could not take effect."""
+        try:
+            with self.state_file.open("rb") as checkpoint:
+                previous_mtime = os.fstat(checkpoint.fileno()).st_mtime_ns
+                previous_contents = checkpoint.read()
+        except FileNotFoundError:
+            previous_contents = None
+        marker = self.begin_create(title)
+        try:
+            yield marker
+        except GitHubRequestNotExecuted:
+            if previous_contents is None:
+                unlink_with_retry(self.state_file)
+            else:
+                # In-memory metadata may already refer to a newly selected Project.
+                # The pre-commit hook also uses the checkpoint's modification time.
+                atomic_write_bytes(
+                    self.state_file, previous_contents, mtime_ns=previous_mtime
+                )
+            self.load()
+            raise
+
+    def finish_create(self, item_id: str) -> None:
+        """Replace the intent with its binding in one locked checkpoint."""
+        if not isinstance(item_id, str) or not item_id:
+            raise GitHubAPIError("Missing item ID for pending create")
+        self.update_task(self.state["pending_create"]["title"], item_id, None)
+        del self.state["pending_create"]
+        self.save_locked()
     
     def verify_board_key(self, board_key: Optional[str]) -> None:
         """Guard the sync state against a copied / swapped board (ADR 0002).
@@ -404,7 +502,7 @@ class StateManager:
         """Get the stored status for a task title."""
         return self.state["tasks"].get(task_title, {}).get("status")
     
-    def update_task(self, task_title: str, item_id: str, status: str):
+    def update_task(self, task_title: str, item_id: str, status: Optional[str]):
         """Update or add a task in the state."""
         self.state["tasks"][task_title] = {
             "item_id": item_id,
@@ -439,7 +537,26 @@ class GitHubClient:
                 "requests not installed. Run: pip install requests"
             )
     
-    def _query(self, query: str, variables: Dict) -> Dict:
+    @staticmethod
+    def _create_rejected(payload: Dict) -> bool:
+        """Only a rejection of the request or mutation itself permits a new CREATE."""
+        mutation = "addProjectV2DraftIssue"
+        if payload.get("data") not in (None, {mutation: None}):
+            return False
+        for error in payload["errors"]:
+            code = error.get("type")
+            extensions = error.get("extensions")
+            if code is None and isinstance(extensions, dict):
+                code = extensions.get("code")
+            path = error.get("path")
+            if code == "RATE_LIMITED" and path in (None, [], [mutation]):
+                continue
+            if code == "FORBIDDEN" and path == [mutation]:
+                continue
+            return False
+        return True
+
+    def _query(self, query: str, variables: Dict, *, creating: bool = False) -> Dict:
         """Execute a GraphQL query."""
         try:
             response = self.requests.post(
@@ -447,15 +564,38 @@ class GitHubClient:
                 headers=self.headers,
                 json={"query": query, "variables": variables},
                 timeout=GITHUB_TIMEOUT_SEC,
+                allow_redirects=not creating,
             )
         except self.requests.RequestException as exc:
+            from urllib3.connection import CertificateError
+            from urllib3.exceptions import ConnectTimeoutError, MaxRetryError, ProxyError
+            from urllib3.exceptions import SSLError as Urllib3SSLError
+
+            # A proxy can lose a response after forwarding CREATE. Only a
+            # failure to establish the connection proves it was never sent.
+            cause = exc.args[0] if exc.args else None
+            if isinstance(cause, MaxRetryError):
+                cause = cause.reason
+            if isinstance(cause, ProxyError):
+                cause = cause.args[1] if len(cause.args) == 2 else None
+            if isinstance(cause, Urllib3SSLError) and cause.args:
+                cause = cause.args[0]
+            setup_errors = (ConnectTimeoutError, ssl.SSLCertVerificationError, CertificateError)
+            if creating and (
+                isinstance(exc, self.requests.ConnectTimeout)
+                or isinstance(cause, setup_errors)
+            ):
+                raise GitHubRequestNotSent(f"GitHub API request failed: {exc}") from exc
             raise GitHubAPIError(f"GitHub API request failed: {exc}") from exc
         
         if response.status_code != 200:
-            raise GitHubAPIError(
+            message = (
                 f"GitHub API returned status {response.status_code}: "
                 f"{response.text}"
             )
+            if creating and response.status_code in (401, 403, 429):
+                raise GitHubRequestNotExecuted(message)
+            raise GitHubAPIError(message)
 
         try:
             data = response.json()
@@ -464,11 +604,16 @@ class GitHubClient:
         if not isinstance(data, dict):
             raise GitHubAPIError("GitHub API returned JSON that is not an object")
         if "errors" in data:
-            details = "\n".join(
-                f"  - {error.get('message', str(error))}"
-                for error in data["errors"]
-            )
-            raise GitHubAPIError(f"GraphQL errors:\n{details}")
+            errors = data["errors"]
+            if not errors or not isinstance(errors, list) or not all(
+                isinstance(error, dict) for error in errors
+            ):
+                raise GitHubAPIError("GitHub API returned malformed GraphQL errors")
+            details = "\n".join(f"  - {error.get('message', error)}" for error in errors)
+            message = f"GraphQL errors:\n{details}"
+            if creating and self._create_rejected(data):
+                raise GitHubRequestNotExecuted(message)
+            raise GitHubAPIError(message)
         
         return data
     
@@ -606,6 +751,7 @@ class GitHubClient:
                     items.append({
                         "id": item["id"],
                         "title": item["content"]["title"],
+                        "body": item["content"].get("body") or "",
                         "status": status
                     })
             
@@ -634,7 +780,8 @@ class GitHubClient:
             "body": body
         }
         
-        data = self._query(mutation, variables)
+        # A timeout on a redirected POST says nothing about the original CREATE.
+        data = self._query(mutation, variables, creating=True)
         return data["data"]["addProjectV2DraftIssue"]["projectItem"]["id"]
     
     def update_item_status(self, project_id: str, item_id: str, status_field_id: str, status_option_id: str):
@@ -699,7 +846,43 @@ class Syncer:
         if len(parts) != 2 or not all(parts):
             raise ConfigurationError("GITHUB_REPO must be 'owner/repo'")
         owner, repo_name = parts
-        
+
+        with kanban_lock(str(self.state.kanban_file.parent)):
+            self._sync_locked(owner, repo_name, project_number)
+
+    def _recover_pending_create(self, project_id: str) -> None:
+        pending = self.state.state.get("pending_create")
+        if pending is None:
+            return
+        saved_project = self.state.state["project_id"]
+        title = pending["title"]
+        if project_id != saved_project:
+            raise ConfigurationError(
+                f"The pending create for {title!r} belongs to Project {saved_project}. "
+                "Select that Project to recover the card before another CREATE."
+            )
+        marker = _create_marker(pending["token"])
+        matches = [
+            item["id"] for item in self.client.get_project_items(project_id)
+            if marker in item["body"].splitlines()
+        ]
+        if len(matches) != 1:
+            raise ConfigurationError(
+                f"Found {len(matches)} draft cards for the pending create of {title!r} "
+                f"in Project {project_id}. Reconcile {marker} before another CREATE."
+            )
+        item_id = matches[0]
+        if any(task["item_id"] == item_id for task in self.state.state["tasks"].values()):
+            raise ConfigurationError(
+                f"The card matching the pending create for {title!r} is already bound. "
+                f"Reconcile {marker} in Project {project_id} before another CREATE."
+            )
+        self.state.finish_create(item_id)
+
+    def _sync_locked(
+        self, owner: str, repo_name: str, project_number: Optional[int]
+    ):
+        """Plan from the latest board and bindings, then checkpoint each mutation."""
         print(f"Parsing {self.board.file_path}...")
         local_tasks = self.board.parse()
         
@@ -712,7 +895,7 @@ class Syncer:
         # check; a keyed board's key is adopted into state on first sync.
         self.state.verify_board_key(read_board_key(self.board.file_path))
 
-        print(f"Connecting to GitHub repository {repo}...")
+        print(f"Connecting to GitHub repository {owner}/{repo_name}...")
         repo_node_id, project_id, status_field_id, status_options = self.client.get_repo_project(
             owner, repo_name, project_number
         )
@@ -720,7 +903,8 @@ class Syncer:
         self.status_field_id = status_field_id
         self.status_options = status_options
         
-        # Update state with project info
+        # Resolve the previous run before planning, even if its task was removed.
+        self._recover_pending_create(project_id)
         self.state.set_project_info(repo_node_id, project_id)
         
         print(f"\nSynchronizing...")
@@ -737,16 +921,9 @@ class Syncer:
             if action == "CREATE":
                 # New task - create it
                 print(f"  [CREATE] {title} => {desired_status}")
-                item_id = self.client.create_draft_issue(project_id, title)
-                # D7+D12: persist item_id with status=None first. The
-                # confirmed status is only persisted AFTER the status
-                # update mutation succeeds. Prevents the stuck-no-status
-                # idempotency bug where a transient failure between
-                # create_draft_issue and update_item_status leaves state
-                # desynced from GH (state thinks status set; GH has none;
-                # next sync sees stored == desired and skips forever).
-                self.state.update_task(title, item_id, None)
-                self.state.save()
+                with self.state.create_intent(title) as marker:
+                    item_id = self.client.create_draft_issue(project_id, title, body=marker)
+                self.state.finish_create(item_id)
 
                 # Set initial status
                 if desired_status in self.status_options:
@@ -756,7 +933,7 @@ class Syncer:
                     )
                     # Confirmed — persist status
                     self.state.update_task(title, item_id, desired_status)
-                    self.state.save()
+                    self.state.save_locked()
                 else:
                     # No matching Status option on the Project. Item is
                     # created with no Status; state stays at None so the
@@ -772,8 +949,7 @@ class Syncer:
                         file=sys.stderr,
                     )
             elif action == "UPDATE":
-                # Status changed (or first status set after a previous
-                # failed attempt — see D12 pattern above)
+                # A recovered card also needs its first confirmed status.
                 print(
                     f"  [UPDATE] {title}: {operation['from_status']} "
                     f"=> {desired_status}"
@@ -785,7 +961,7 @@ class Syncer:
                     )
                     # Confirmed — persist
                     self.state.update_task(title, item_id, desired_status)
-                    self.state.save()
+                    self.state.save_locked()
                 else:
                     # No matching Status option. Skip the update; state
                     # stays at stored_status. Sync will keep flagging
@@ -803,19 +979,17 @@ class Syncer:
                 self.state.remove_task(title)
                 # D7: persist after each archive so the local state matches
                 # the GH-side archive even if the loop is interrupted.
-                self.state.save()
+                self.state.save_locked()
 
         # End-of-loop save remains as a defensive flush; a no-op when
         # per-item saves already covered every mutation, but cheap and
         # keeps the existing "Sync complete" semantics intact.
         print(f"\nSaving state...")
-        self.state.save()
+        self.state.save_locked()
         print(f"Sync complete!")
 
 
 def _main():
-    _load_cli_dotenv()
-
     # Fix console encoding for Windows; 'replace' (R11) so a stray byte cannot raise into the parent's pipe drain.
     if sys.platform == 'win32':
         import codecs
@@ -824,26 +998,37 @@ def _main():
     
     parser = argparse.ArgumentParser(description='Sync markdown kanban to GitHub Projects')
     parser.add_argument('kanban_file', help='Path to the markdown kanban file')
-    parser.add_argument('--repo', help='GitHub repo (owner/name)', default=os.environ.get('GITHUB_REPO') or None)
-    parser.add_argument('--project', type=int, help='GitHub Project number (optional if only one project linked)',
-                        default=os.environ.get('GITHUB_PROJECT_NUMBER') or None)
-    parser.add_argument('--dry-run', action='store_true', help='Print local sync plan without GitHub access')
+    parser.add_argument('--repo', help='GitHub repo (owner/name)')
+    parser.add_argument('--project', type=int, help='GitHub Project number (optional if only one project linked)')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--dry-run', action='store_true', help='Print local sync plan without GitHub access')
+    mode.add_argument('--check-state', action='store_true',
+                      help='Check the saved sync checkpoint for pre-commit without GitHub access')
     
     args = parser.parse_args()
     
-    # Convert project number from env var
-    if args.project and isinstance(args.project, str):
-        args.project = int(args.project) if args.project.isdigit() else None
-
     if not os.path.exists(args.kanban_file):
         raise ConfigurationError(f"File not found: {args.kanban_file}")
+
+    if args.check_state:
+        print(StateManager(args.kanban_file).checkpoint_status())
+        return
+
+    _load_cli_dotenv()
+    if args.repo is None:
+        args.repo = os.environ.get('GITHUB_REPO')
+    if args.project is None and os.environ.get('GITHUB_PROJECT_NUMBER'):
+        try:
+            args.project = int(os.environ['GITHUB_PROJECT_NUMBER'])
+        except ValueError:
+            parser.error("GITHUB_PROJECT_NUMBER must be an integer")
 
     # Initialize components
     board = LocalBoard(args.kanban_file)
 
     if args.dry_run:
         state = StateManager(args.kanban_file)
-        state.load(read_only=True)
+        state.load_for_preview()
         state.verify_board_key(read_board_key(args.kanban_file))
         print(json.dumps(build_sync_plan(
             _flatten_local_tasks(board.parse()), state.state["tasks"]

@@ -197,13 +197,16 @@ def register_resources(server: FastMCP):
             
             items = state.get("tasks", {})
             
-            return json.dumps({
-                "synced": True,
+            status = {
+                "synced": "pending_create" not in state,
                 "synced_tasks": len(items),
                 "state_file": state_path,
                 "github_item_ids": [item.get("item_id") for item in items.values()],
                 "local_task_titles": list(items.keys())
-            }, indent=2)
+            }
+            if "pending_create" in state:
+                status["message"] = "Run sync to reconcile the pending create."
+            return json.dumps(status, indent=2)
         except Exception as e:
             return json.dumps({
                 "error": f"Error reading sync state: {str(e)}"
