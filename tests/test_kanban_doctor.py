@@ -670,6 +670,7 @@ def test_read_mcp_project_env_handles_missing_and_unparseable(tmp_path: Path):
     (b'{"tasks":{"T":{"item_id":null,"status":null}}}', "invalid item_id"),
     (b'{"tasks":{}, "tasks":{}}', "duplicate JSON key"),
     (b'{"schema_version":[], "tasks":{}}', "invalid schema_version"),
+    (b'{"tasks":{"held":{"item_id":"draft","status":"Done","recovered":0}}}', "invalid recovered flag"),
     (b'{"board_key":"?", "tasks":{}}', "invalid board_key"),
 ])
 def test_doctor_flags_corrupt_state_file(tmp_path, monkeypatch, contents, detail):

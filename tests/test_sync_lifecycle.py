@@ -502,7 +502,7 @@ def test_archive_failure_keeps_state_for_retry(tmp_path):
         ).sync("owner/repo", 8)
 
     assert StateManager(str(board_path)).load()["tasks"] == {
-        "Removed": {"item_id": "PVTI_removed", "status": "Done"}
+        "Removed": {"item_id": "PVTI_removed", "status": "Done", "marked": True}
     }
 
 

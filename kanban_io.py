@@ -453,6 +453,8 @@ def _validate_sync_state(state):
             raise ValueError(f"invalid status for {title!r}")
         if "marked" in task and type(task["marked"]) is not bool:
             raise ValueError(f"invalid marker flag for {title!r}")
+        if "recovered" in task and type(task["recovered"]) is not bool:
+            raise ValueError(f"invalid recovered flag for {title!r}")
 
 
 def write_state(workspace: str, state: dict) -> None:

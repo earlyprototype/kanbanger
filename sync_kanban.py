@@ -131,14 +131,16 @@ def build_sync_plan(
 
     for title, stored in state_tasks.items():
         if title not in local_flat:
+            action = "PENDING_ARCHIVE" if stored.get("recovered") else "ARCHIVE"
             operations.append({
-                "action": "ARCHIVE",
+                "action": action,
                 "title": title,
                 "from_status": stored.get("status"),
                 "to_status": None,
                 "item_id": stored.get("item_id"),
             })
-            summary["archive"] += 1
+            key = action.lower()
+            summary[key] = summary.get(key, 0) + 1
 
     return {"operations": operations, "summary": summary}
 
@@ -292,7 +294,7 @@ class StateManager:
 
     def verify_source(self):
         if self.read_source() != self.source:
-            raise ConfigurationError("Sync state changed during the scan. Inspect the sidecar and retry.")
+            raise ConfigurationError("Sync state changed during sync. Inspect the sidecar and retry.")
 
     def load(self, *, read_only: bool = False) -> Dict:
         """Parse a single snapshot so recovery can detect a concurrent restore."""
@@ -313,9 +315,6 @@ class StateManager:
             raise ConfigurationError("Sync state requires a newer version of Kanbanger")
         return self.state
 
-    def save_unlocked(self):
-        atomic_write_json(str(self.state_file), self.state)
-
     def save(self):
         with kanban_lock(str(self.kanban_file.parent)):
             self.save_unlocked()
@@ -329,18 +328,22 @@ class StateManager:
             os.link(source, target)
             source.unlink()
 
-    def save_recovered(self, *, corrupt: bool) -> Optional[Path]:
-        """Preserve the actual displaced file and publish only into an empty slot."""
+    def save_unlocked(self, *, corrupt: bool = False) -> Optional[Path]:
+        """Replace only the verified snapshot and remember the exact bytes published."""
         try:
             with tempfile.TemporaryDirectory(dir=self.state_file.parent) as staging:
                 replacement = Path(staging) / self.state_file.name
                 atomic_write_json(str(replacement), self.state)
+                published = replacement.read_bytes()
                 self.verify_source()
+                if published == self.source:
+                    return None
                 if self.source is not None:
                     self.state_file.rename(self.displaced_file)
                 try:
                     if self.source is not None and self.displaced_file.read_bytes() != self.source:
-                        raise ConfigurationError("Sync state changed before replacement. Retry recovery.")
+                        raise ConfigurationError("Sync state changed before replacement. "
+                                                 "Inspect the sidecar and retry.")
                     self._install_if_absent(replacement, self.state_file)
                 except BaseException:
                     if self.source is not None:
@@ -348,18 +351,29 @@ class StateManager:
                         # versions for inspection and block the next sync.
                         self._install_if_absent(self.displaced_file, self.state_file)
                     raise
+                backup = None
                 if self.source is not None:
                     if corrupt:
                         backup = self.state_file.with_suffix(f".json.corrupt-{uuid4().hex}")
                         self.displaced_file.rename(backup)
-                        return backup
-                    self.displaced_file.unlink()
+                    else:
+                        self.displaced_file.unlink()
+                self.source = published
+                return backup
         except FileExistsError as exc:
             raise ConfigurationError("Sync state changed before replacement. Inspect the sidecar "
                                      "and any .kanban.json.recovering file before retrying.") from exc
         except OSError as exc:
-            raise ConfigurationError(f"Could not install recovered sync state: {exc}") from exc
-        return None
+            raise ConfigurationError(f"Could not install sync state: {exc}") from exc
+
+    def save_after(self, action: str, title: str, item_id: str):
+        try:
+            self.save_unlocked()
+        except ConfigurationError as exc:
+            raise ConfigurationError(
+                f"Sync interrupted after {action} of {title!r} ({item_id}). {exc} "
+                "Inspect --recover --dry-run before resuming."
+            ) from exc
 
     def verify_board_key(self, board_key: Optional[str]) -> None:
         """Pair legacy state with its board and refuse a changed or lost key."""
@@ -581,9 +595,6 @@ class GitHubClient:
                     if not isinstance(item_id, str) or not item_id or item_id in item_ids:
                         raise ValueError("missing or repeated project item ID")
                     item_ids.add(item_id)
-                    if node["isArchived"] is True:
-                        items.append({"id": item_id, "archived": True})
-                        continue
                     content = node["content"]
                     if content and content["__typename"] == "PullRequest":
                         continue
@@ -823,7 +834,7 @@ class Syncer:
         if board_key is None:
             raise ConfigurationError(marker_guidance)
         if recover:
-            backup = self.state.save_recovered(corrupt=state_kind == "corrupt")
+            backup = self.state.save_unlocked(corrupt=state_kind == "corrupt")
             if backup is not None:
                 report["backup"] = str(backup)
             return report
@@ -833,6 +844,7 @@ class Syncer:
             body = bind_marker(item["body"], board_key, title, item["id"])
             self.client.mark_draft(item["id"], item["title"], item["body"], body)
             self.state.state["tasks"][title]["marked"] = True
+            self.state.save_after("MARK", title, item["id"])
 
         self._apply_plan(plan, project_id, field_id, options, board_key)
 
@@ -856,7 +868,7 @@ class Syncer:
                 # desynced from GH (state thinks status set; GH has none;
                 # next sync sees stored == desired and skips forever).
                 self.state.update_task(title, item_id, None)
-                self.state.save_unlocked()
+                self.state.save_after(action, title, item_id)
                 bound_marker = item_marker(board_key, title, item_id)
                 self.client.mark_draft(item_id, title, provisional, bound_marker)
 
@@ -869,7 +881,7 @@ class Syncer:
                     )
                     # Confirmed — persist status
                     self.state.update_task(title, item_id, desired_status)
-                    self.state.save_unlocked()
+                    self.state.save_after("UPDATE", title, item_id)
                 else:
                     # No matching Status option on the Project. Item is
                     # created with no Status; state stays at None so the
@@ -899,7 +911,7 @@ class Syncer:
                     )
                     # Confirmed — persist
                     self.state.update_task(title, item_id, desired_status)
-                    self.state.save_unlocked()
+                    self.state.save_after(action, title, item_id)
                 else:
                     # No matching Status option. Skip the update; state
                     # stays at stored_status. Sync will keep flagging
@@ -911,14 +923,18 @@ class Syncer:
                         f"not updated. Sync will retry next run.",
                         file=sys.stderr,
                     )
-            else:  # ARCHIVE
-                print(f"  [ARCHIVE] {title}")
+            elif action in ("ARCHIVE", "PENDING_ARCHIVE"):
                 self.client.verify_owned_draft(item_id, board_key, title)
+                if action == "PENDING_ARCHIVE":
+                    print(f"  [PENDING_ARCHIVE] {title} ({item_id}). Confirm this item is "
+                          "still the expected draft on GitHub before archiving it manually.")
+                    continue
+                print(f"  [ARCHIVE] {title}")
                 self.client.archive_item(project_id, item_id)
                 self.state.remove_task(title)
                 # D7: persist after each archive so the local state matches
                 # the GH-side archive even if the loop is interrupted.
-                self.state.save_unlocked()
+                self.state.save_after(action, title, item_id)
 
         # End-of-loop save remains as a defensive flush; a no-op when
         # per-item saves already covered every mutation, but cheap and

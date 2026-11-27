@@ -58,6 +58,7 @@ GITIGNORE_ENTRIES = (
     ".env.local",
     ".kanban.json",
     ".kanban.json.corrupt-*",
+    ".kanban.json.recovering",
     ".kanban.lock",
     ".claude/settings.local.json",
     ".venv/",

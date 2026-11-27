@@ -91,9 +91,9 @@ def test_recovery_round_trip(tmp_path, corrupt):
     preview = run(board, project, recover=True, preview=True)
     project.items.reverse()
     assert run(board, project, recover=True, preview=True) == preview
-    assert preview["plan"]["summary"] == {"create": 0, "update": 1, "archive": 1}
+    assert preview["plan"]["summary"] == {"create": 0, "update": 1, "archive": 0, "pending_archive": 1}
     assert [(op["action"], op["item_id"]) for op in preview["plan"]["operations"]] == [
-        ("UPDATE", first["id"]), ("ARCHIVE", removed["id"]),
+        ("UPDATE", first["id"]), ("PENDING_ARCHIVE", removed["id"]),
     ]
     if corrupt:
         assert path.read_bytes() == b"\xffbroken"
@@ -107,7 +107,12 @@ def test_recovery_round_trip(tmp_path, corrupt):
         assert backup.read_bytes() == b"\xffbroken"
     run(board, project)
     run(board, project)
-    assert project.writes == [("update", first["id"]), ("archive", removed["id"])]
+    assert project.writes == [("update", first["id"])]
+    assert not removed["archived"]
+    assert json.loads(path.read_bytes())["tasks"]["Removed"]["item_id"] == removed["id"]
+    project.archive_item("project", removed["id"])  # Operator completes the pending archive.
+    run(board, project)
+    assert "Removed" not in json.loads(path.read_bytes())["tasks"]
     assert project.items[0] == unrelated
 
 
@@ -160,6 +165,41 @@ def test_converted_pre_marker_draft_blocks_create_after_state_loss(tmp_path):
     assert project.writes == [] and not state.exists()
 
 
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_renamed_converted_legacy_draft_requires_explicit_recovery(tmp_path, corrupt):
+    board = tmp_path / "_kanban.md"
+    board_at(board, "## TODO\n* [ ] Original\n")
+    project = Project()
+    item_id = project.create_draft_issue("project", "Original", "Legacy notes")
+    state = tmp_path / ".kanban.json"
+    state.write_text(json.dumps({"tasks": {"Original": {"item_id": item_id, "status": "Todo"}}}))
+    project.items[0].update(type="Issue", draft_id=None)
+    project.items[0]["title"] = "Renamed after conversion"
+    state.unlink()
+    if corrupt:
+        state.write_bytes(b"{")
+    project.writes.clear()
+    before = deepcopy(project.items)
+
+    preview = run(board, project, recover=True, preview=True)
+    assert preview["unmarked"] == {item_id: "Renamed after conversion"}
+    assert preview["owned"] == {}
+    assert preview["plan"]["operations"][0]["action"] == "CREATE"
+    with pytest.raises(ConfigurationError, match="recover"):
+        run(board, project)
+    if corrupt:
+        assert state.read_bytes() == b"{"
+    else:
+        assert not state.exists()
+    assert project.writes == [] and project.items == before
+    # The operator can remove the local task after identifying the issue.
+    board_at(board, "## TODO\n")
+    run(board, project, recover=True)
+    run(board, project)
+    assert project.writes == [] and project.items == before
+    assert json.loads(state.read_bytes())["tasks"] == {}
+
+
 @pytest.mark.parametrize("notes", [
     "Look for the prefix `<!-- kanbanger:item:` in the body.",
     "<!-- kanbanger:item:... is the start of a marker in a draft.",
@@ -174,6 +214,8 @@ def test_documentation_issue_can_mention_the_marker_prefix(tmp_path, notes):
     project.writes.clear()
     preview = run(board, project, recover=True, preview=True)
     assert preview["plan"]["summary"] == {"create": 1, "update": 0, "archive": 0}
+    assert preview["unmarked"] == {"item-0": "Documentation"}
+    run(board, project, recover=True)
     run(board, project)
     assert project.items[0] == sentinel
     assert project.writes == [("create", "item-1"), ("mark", "item-1"), ("update", "item-1")]
@@ -224,6 +266,43 @@ def test_recovery_detects_sidecar_removal_during_scan(tmp_path, monkeypatch):
     assert not path.exists()
 
 
+@pytest.mark.parametrize("stage", ["create", "initial status", "update", "archive", "migration"])
+def test_restore_during_ordinary_write_preserves_bytes_and_reports_item(tmp_path, monkeypatch, stage):
+    board = tmp_path / "_kanban.md"
+    path = tmp_path / ".kanban.json"
+    project = Project()
+    board_at(board, "## TODO\n* [ ] Current\n")
+    if stage in ("update", "archive"):
+        run(board, project)
+        board_at(board, "## DONE\n* [ ] Current\n" if stage == "update" else "## TODO\n")
+    elif stage == "migration":
+        current = project.create_draft_issue("project", "Current", "Existing notes")
+        path.write_text(json.dumps({"tasks": {"Current": {"item_id": current, "status": "Todo"}}}))
+    else:
+        path.write_bytes(b'{"tasks":{}}')
+    legacy = project.create_draft_issue("project", "Legacy", "Existing draft")
+    restored = json.dumps({"tasks": {"Legacy": {"item_id": legacy, "status": "Todo"}}},
+                          indent=4).encode() + b"\n"
+    methods = {"create": "create_draft_issue", "archive": "archive_item", "migration": "mark_draft"}
+    method = methods.get(stage, "update_item_status")
+    mutate = getattr(project, method)
+
+    def restore_in_flight(*args):
+        result = mutate(*args)
+        path.write_bytes(restored)
+        return result
+
+    project.writes.clear()
+    monkeypatch.setattr(project, method, restore_in_flight)
+    with pytest.raises(ConfigurationError) as raised:
+        run(board, project)
+    error = str(raised.value)
+    operation, item_id = project.writes[-1]
+    assert "changed" in error and operation.upper() in error and item_id in error
+    assert "Current" in error and path.read_bytes() == restored
+    assert not list(tmp_path.glob(".kanban.json.*"))
+
+
 def test_recovery_checks_the_displaced_sidecar(tmp_path, monkeypatch):
     board = tmp_path / "_kanban.md"
     board_at(board, "## TODO\n")
@@ -244,13 +323,15 @@ def test_recovery_checks_the_displaced_sidecar(tmp_path, monkeypatch):
     assert not list(tmp_path.glob(".kanban.json.*"))
 
 
-@pytest.mark.parametrize("corrupt", [False, True])
-def test_recovery_never_replaces_a_restore_at_publication(tmp_path, monkeypatch, corrupt):
+@pytest.mark.parametrize(("initial", "recover"), [
+    (None, True), (b"{", True), (None, False), (b'{"tasks":{}}', False),
+])
+def test_sync_never_replaces_a_restore_at_publication(tmp_path, monkeypatch, initial, recover):
     board = tmp_path / "_kanban.md"
     board_at(board, "## TODO\n")
     path = tmp_path / ".kanban.json"
-    if corrupt:
-        path.write_bytes(b"{")
+    if initial is not None:
+        path.write_bytes(initial)
     restored = b'{"tasks":{"Legacy":{"item_id":"legacy-id","status":"Todo"}}}'
     install = StateManager._install_if_absent
 
@@ -261,11 +342,11 @@ def test_recovery_never_replaces_a_restore_at_publication(tmp_path, monkeypatch,
 
     monkeypatch.setattr(StateManager, "_install_if_absent", staticmethod(restore_before_install))
     with pytest.raises(ConfigurationError, match="state changed"):
-        run(board, Project(), recover=True)
+        run(board, Project(), recover=recover)
     assert path.read_bytes() == restored
     displaced = tmp_path / ".kanban.json.recovering"
-    if corrupt:
-        assert displaced.read_bytes() == b"{"
+    if initial is not None:
+        assert displaced.read_bytes() == initial
         with pytest.raises(ConfigurationError, match="Interrupted recovery"):
             run(board, None)
     else:
@@ -374,6 +455,41 @@ def test_v1_marker_needs_matching_sidecar_to_upgrade(tmp_path):
     assert project.items[0]["body"] == notes + f"<!-- kanbanger:item:v2 {KEY} 4c6567616379 {item_id} -->\n"
     path.unlink()
     assert run(board, project, recover=True, preview=True)["owned"] == {"Legacy": item_id}
+
+
+def test_recorded_legacy_notes_can_quote_a_marker_prefix(tmp_path):
+    board = tmp_path / "_kanban.md"
+    board_at(board, "## TODO\n* [ ] Legacy\n")
+    project = Project()
+    notes = "Keep this example: `<!-- kanbanger:item:`.\r\n"
+    item_id = project.create_draft_issue("project", "Legacy", notes)
+    path = tmp_path / ".kanban.json"
+    path.write_text(json.dumps({"tasks": {"Legacy": {"item_id": item_id, "status": "Todo"}}}))
+    assert run(board, project, recover=True, preview=True)["mark_on_next_sync"] == {"Legacy": item_id}
+    run(board, project)
+    assert project.items[0]["body"] == notes + f"\n\n<!-- kanbanger:item:v2 {KEY} 4c6567616379 {item_id} -->"
+    project.items[0]["body"] = notes
+    before = path.read_bytes()
+    project.writes.clear()
+    with pytest.raises(ConfigurationError, match=f"{item_id}.*marker missing"):
+        run(board, project)
+    assert project.writes == [] and path.read_bytes() == before
+
+
+def test_recorded_legacy_draft_with_a_malformed_marker_line_refuses_migration(tmp_path):
+    board = tmp_path / "_kanban.md"
+    board_at(board, "## TODO\n* [ ] Legacy\n")
+    project = Project()
+    body = "Notes\n\n<!-- kanbanger:item:broken -->"
+    item_id = project.create_draft_issue("project", "Legacy", body)
+    path = tmp_path / ".kanban.json"
+    path.write_text(json.dumps({"tasks": {"Legacy": {"item_id": item_id, "status": "Todo"}}}))
+    before = path.read_bytes()
+    project.writes.clear()
+    with pytest.raises(ConfigurationError, match=f"{item_id}.*invalid.*marker"):
+        run(board, project)
+    assert project.items[0]["body"] == body and project.writes == []
+    assert path.read_bytes() == before
 
 
 def test_retry_after_archive_response_is_lost(tmp_path, monkeypatch):
@@ -575,6 +691,64 @@ def test_converted_issue_is_detected_with_lost_state(tmp_path, monkeypatch):
         with pytest.raises(ConfigurationError, match="(?i)item-0.*issue"):
             run(board, client, **options)
     assert not path.exists()
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_archived_bound_draft_blocks_replacement_by_original_task_key(tmp_path, monkeypatch, corrupt):
+    board = tmp_path / "_kanban.md"
+    board_at(board, "## TODO\n* [ ] First\n* [ ] Still local\n")
+    path = tmp_path / ".kanban.json"
+    if corrupt:
+        path.write_bytes(b"{")
+    client = GitHubClient("unused")
+    monkeypatch.setattr(client, "get_repo_project", Project().get_repo_project)
+
+    def query(document, variables):
+        assert "archivedStates: [NOT_ARCHIVED, ARCHIVED]" in document
+        node = {"id": "archived-id", "isArchived": True, "fieldValueByName": None,
+                "content": {"__typename": "DraftIssue", "id": "draft-id", "title": "Renamed",
+                            "body": f"<!-- kanbanger:item:v2 {KEY} 5374696c6c206c6f63616c archived-id -->"}}
+        return {"data": {"node": {"items": {"nodes": [node], "pageInfo": {"hasNextPage": False}}}}}
+
+    monkeypatch.setattr(client, "_query", query)
+    for options in ({"recover": True, "preview": True}, {"recover": True}, {}):
+        message = "corrupt" if corrupt and not options else "archived-id.*Still local"
+        with pytest.raises(ConfigurationError, match=message):
+            run(board, client, **options)
+    if corrupt:
+        assert path.read_bytes() == b"{"
+    else:
+        assert not path.exists()
+    assert not list(tmp_path.glob(".kanban.json.*"))
+
+
+def test_conversion_after_ownership_read_cannot_archive_recovered_item(tmp_path, monkeypatch, capsys):
+    board = tmp_path / "_kanban.md"
+    path = tmp_path / ".kanban.json"
+    board_at(board, "## TODO\n* [ ] Removed\n")
+    project = Project()
+    run(board, project)
+    item, = project.items
+    board_at(board, "## TODO\n")
+    path.unlink()
+    run(board, project, recover=True)
+    project.writes.clear()
+    verify = project.verify_owned_draft
+
+    def convert_after_read(*args):
+        verify(*args)
+        item["type"] = "Issue"
+
+    monkeypatch.setattr(project, "verify_owned_draft", convert_after_read)
+    run(board, project)
+    assert item["type"] == "Issue" and not item["archived"]
+    assert project.writes == []
+    assert json.loads(path.read_bytes())["tasks"]["Removed"]["item_id"] == item["id"]
+    output = capsys.readouterr().out
+    assert "PENDING_ARCHIVE" in output and item["id"] in output
+    with pytest.raises(ConfigurationError, match=f"{item['id']}.*repository issue"):
+        run(board, project)
+    assert project.writes == [] and "Removed" in json.loads(path.read_bytes())["tasks"]
 
 
 @pytest.mark.parametrize("invalid_first", [True, False])

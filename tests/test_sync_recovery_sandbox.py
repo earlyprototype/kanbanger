@@ -63,12 +63,13 @@ def test_recover_in_github_project(tmp_path):
         path.unlink()
         plan = sync(recover=True, preview=True)["plan"]
         assert [(op["action"], op["item_id"]) for op in plan["operations"]] == [
-            ("ARCHIVE", owned)
+            ("PENDING_ARCHIVE", owned)
         ]
         sync(recover=True)
         sync()
         items = {row["id"]: row for row in client.get_project_items(project)}
-        assert owned not in items or items[owned]["archived"]
+        assert items[owned]["archived"] is False
+        assert json.loads(path.read_bytes())["tasks"][title]["item_id"] == owned
         assert items[sentinel] == before
     finally:
         for row in client.get_project_items(project):

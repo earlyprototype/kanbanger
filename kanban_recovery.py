@@ -14,7 +14,8 @@ _PREFIX = "<!-- kanbanger:item:"
 # A marker line or an embedded, board-specific claim deserves inspection.
 # Quoting the comment prefix in prose does not claim a Project item.
 _CLAIM = re.compile(
-    rf"^[ \t]*{_PREFIX}v\d+\b|{_PREFIX}[\w-]+[ \t]+{BOARD_KEY_PATTERN}(?=\s|-->|$)",
+    rf"^[ \t]*{_PREFIX}(?:v\d+\b|[^\r\n]*-->[ \t]*\r?$)"
+    rf"|{_PREFIX}[\w-]+[ \t]+{BOARD_KEY_PATTERN}(?=\s|-->|$)",
     re.MULTILINE,
 )
 _MARKER = re.compile(
@@ -41,11 +42,11 @@ def bind_marker(body: str, board_key: str, title: str, item_id: str) -> str:
     return body + "\n\n" + marker if body else marker
 
 
-def _read_marker(body: str, *, recorded: bool = False):
+def _read_marker(body: str):
     if _PREFIX not in body:
         return None
     claims = _CLAIM.findall(body)
-    if not claims and not recorded:
+    if not claims:
         return None
     footer = body.rstrip().rsplit("\n", 1)[-1]
     match = _MARKER.fullmatch(footer)
@@ -76,24 +77,21 @@ class Inventory:
 
 
 def inspect_drafts(items, board_key, stored, local, *, recover):
-    """Check all active drafts, including records outside the local board."""
+    """Check active and archived items before planning changes to the Project."""
     result = Inventory()
     by_id = {task["item_id"]: title for title, task in stored.items()}
     seen = set()
+    archived = {}
     conflicts = []
     for item in sorted(items, key=lambda row: row["id"]):
         item_id = item["id"]
-        if item["archived"]:
-            # A retry after a successful archive can drop the stale record.
-            if item_id in by_id and by_id[item_id] not in local:
-                seen.add(item_id)
-            continue
         stored_title = by_id.get(item_id)
         try:
-            marker = _read_marker(item["body"], recorded=stored_title is not None)
+            marker = _read_marker(item["body"])
         except OwnershipConflict as exc:
             conflicts.append(f"{item_id}: {exc}")
             continue
+        bound_id = None
         if marker:
             owner, title, bound_id = marker
             if board_key is None:
@@ -113,45 +111,51 @@ def inspect_drafts(items, board_key, stored, local, *, recover):
             if stored_title is not None and title != stored_title:
                 conflicts.append(f"{item_id}: marker and sidecar name different tasks")
                 continue
-            if bound_id is None:
-                if stored_title is None:
-                    conflicts.append(f"{item_id}: unbound marker for {title!r}. Restore the "
-                                     "sidecar with the confirmed item ID or resolve it on GitHub")
-                    continue
-                result.legacy[title] = item
-        elif item.get("type") == "Issue":
-            if stored_title is not None:
-                conflicts.append(f"{item_id}: recorded draft is now a repository issue")
-            elif item["title"] in local:
-                # Conversion retains the Project item ID. A pre-marker draft
-                # can now look exactly like an independently created issue.
-                result.unmarked[item_id] = item["title"]
-            continue
+            if bound_id is None and stored_title is None:
+                conflicts.append(f"{item_id}: unbound marker for {title!r}. Restore the "
+                                 "sidecar with the confirmed item ID or resolve it on GitHub")
+                continue
         elif stored_title is not None:
+            if item.get("type") == "Issue":
+                conflicts.append(f"{item_id}: recorded draft is now a repository issue")
+                continue
             title = stored_title
             if stored[title].get("marked") or item["title"] != title:
                 conflicts.append(f"{item_id}: ownership marker missing or legacy title changed")
                 continue
-            result.legacy[title] = item
         else:
+            # An issue can be a converted, renamed pre-marker draft.
             result.unmarked[item_id] = item["title"]
             continue
 
+        if item["archived"]:
+            archived[item_id] = title
+            seen.add(item_id)
+            continue
         existing = result.tasks.get(title) or stored.get(title)
         if existing and existing["item_id"] != item_id:
             ids = sorted((existing["item_id"], item_id))
             conflicts.append(f"{title!r}: conflicting item IDs {', '.join(ids)}")
             continue
         seen.add(item_id)
+        if bound_id is None:
+            result.legacy[title] = item
         record = dict(stored.get(title, {}), item_id=item_id)
         if recover or title not in stored:
             record["status"] = item["status"]
         if marker:
             record["marked"] = True
+        if recover and (title not in stored or title not in local):
+            # Keep the hold across syncs, including status changes before removal.
+            record["recovered"] = True
         result.tasks[title] = record
 
     for item_id in sorted(by_id.keys() - seen):
         conflicts.append(f"{item_id}: cannot verify the recorded draft for {by_id[item_id]!r}")
+    for item_id, title in archived.items():
+        if title in local and title not in result.tasks:
+            conflicts.append(f"{item_id}: archived draft for {title!r} is still on the board. "
+                             "Restore the draft on GitHub or remove the local task before syncing")
     for item_id, title in result.unmarked.items():
         if title in local and title not in result.tasks:
             conflicts.append(f"{item_id}: unmarked Project item matches {title!r}. Restore the "
