@@ -37,10 +37,10 @@ class FakeProject:
     def get_repo_project(self, owner, repo, project_number):
         return "repo", "project", "status", {"Todo": "todo-option"}
 
-    def create_draft_issue(self, project_id, title):
+    def create_draft_issue(self, project_id, title, body):
         item_id = f"card-{self.hook}"
         with (Path("remote") / item_id).open("x", encoding="utf-8") as card:
-            card.write(title)
+            card.write(f"{title}\n{body}")
         if self.hook == "first":
             wait_for(Path("release-first"))
         return item_id
@@ -100,14 +100,18 @@ def test_overlapping_hooks_create_one_bound_card_per_board(tmp_path):
         first.result()
         second.result()
 
+    markers = []
     for workspace, item_id in (
         (first_board, "card-first"), (other_board, "card-independent")
     ):
         cards = list((workspace / "remote").iterdir())
         assert [card.name for card in cards] == [item_id]
-        assert cards[0].read_text(encoding="utf-8") == "Shared title\ntodo-option"
+        title, marker, status = cards[0].read_text(encoding="utf-8").splitlines()
+        assert (title, status) == ("Shared title", "todo-option")
+        markers.append(marker)
         saved = json.loads((workspace / ".kanban.json").read_text(encoding="utf-8"))
         assert saved["tasks"] == {"Shared title": {"item_id": item_id, "status": "Todo"}}
+    assert markers[0] != markers[1]
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows CRT locking")

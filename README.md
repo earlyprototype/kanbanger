@@ -303,8 +303,11 @@ And these **prompts**:
 Created next to the board on first real sync. It pairs local task titles with their GitHub item ids so re-syncs update instead of duplicate. It's machine-state, not content — provisioning already adds it to `.gitignore`. If it's deleted, the next sync re-creates state (and can duplicate items already on the Project), so leave it alone.
 
 Overlapping syncs for the same board take turns. Each reads the board and its saved bindings under the board lock.
-Sync saves each new card's ID before setting its status, so a failed status update can retry against the same card.
 Boards in separate directories can sync at the same time.
+
+Before creating a card, sync saves a `pending_create` record in `.kanban.json` and includes its unique token in a comment in the draft body. If the response is lost or the binding cannot be saved, the next sync looks for that comment in the recorded Project. A single match restores the item ID. Sync saves the ID before setting the status, so a failed status update retries against the same card.
+
+If recovery finds zero or multiple matches, sync stops. Inspect the draft bodies in the recorded Project. If the intended card exists, restore the reported comment on that card alone and rerun sync. If you have confirmed that the create never took effect, stop the hooks, remove only `pending_create` from `.kanban.json`, and rerun sync.
 
 ### The board-id marker
 

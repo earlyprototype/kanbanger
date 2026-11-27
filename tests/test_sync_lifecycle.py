@@ -347,8 +347,11 @@ def test_sync_executes_local_plan_without_remote_reconciliation(tmp_path, monkey
                 }]},
             }}})
         if "addProjectV2DraftIssue" in query:
+            pending = StateManager(str(board_path)).load()["pending_create"]
+            assert pending["title"] == "New"
             assert variables == {
-                "projectId": "PVT_project", "title": "New", "body": ""
+                "projectId": "PVT_project", "title": "New",
+                "body": f"<!-- kanbanger:create-id: {pending['token']} -->",
             }
             return Response({"data": {"addProjectV2DraftIssue": {
                 "projectItem": {"id": "PVTI_new"}
@@ -398,7 +401,7 @@ def test_created_item_is_durable_before_initial_status_failure(tmp_path):
             return "R_repo", "PVT_project", "PVTSSF_status", {"Todo": "opt_todo"}
 
         @staticmethod
-        def create_draft_issue(project_id, title):
+        def create_draft_issue(project_id, title, body):
             created.append(title)
             return "PVTI_new"
 

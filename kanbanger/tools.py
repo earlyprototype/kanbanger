@@ -846,7 +846,7 @@ def register_tools(server: FastMCP):
             board = LocalBoard(kanban_path)
             state = StateManager(kanban_path)
             try:
-                state.load(read_only=True)
+                state.load_for_preview()
             except ConfigurationError as exc:
                 return _error(ERROR_CONFIGURATION, str(exc))
             try:

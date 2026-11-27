@@ -12,6 +12,7 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
+from uuid import uuid4
 
 from kanban_io import (
     atomic_write_json,
@@ -75,6 +76,10 @@ class ProjectNotFoundError(KanbangerError):
 class ConfigurationError(KanbangerError):
     """Required configuration is missing or invalid: env var, file
     path, or runtime dependency."""
+
+
+def _create_marker(token: str) -> str:
+    return f"<!-- kanbanger:create-id: {token} -->"
 
 
 def build_sync_plan(
@@ -251,6 +256,7 @@ class StateManager:
                 f"Unable to read sync state: {self.state_file} ({exc})"
             ) from exc
         if state_exists:
+            loaded = None
             try:
                 with open(self.state_file, 'r', encoding='utf-8') as f:
                     loaded = json.load(f)
@@ -259,6 +265,19 @@ class StateManager:
                 tasks = loaded.get("tasks")
                 if not isinstance(tasks, dict):
                     raise ValueError("'tasks' is missing or not an object")
+                if "pending_create" in loaded:
+                    pending = loaded["pending_create"]
+                    if not (
+                        isinstance(pending, dict)
+                        and isinstance(pending.get("title"), str)
+                        and pending["title"]
+                        and pending["title"] not in tasks
+                        and isinstance(pending.get("token"), str)
+                        and re.fullmatch(r"[0-9a-f]{32}", pending["token"])
+                        and isinstance(loaded.get("project_id"), str)
+                        and loaded["project_id"]
+                    ):
+                        raise ValueError("invalid pending create record")
                 for task in tasks.values():
                     if not isinstance(task, dict):
                         raise ValueError("every task record must be an object")
@@ -283,6 +302,11 @@ class StateManager:
                     detail = f"{exc.msg} at line {exc.lineno} col {exc.colno}"
                 else:
                     detail = str(exc)
+                if isinstance(loaded, dict) and "pending_create" in loaded:
+                    raise ConfigurationError(
+                        f"Reconcile the pending create in {self.state_file} "
+                        f"before another CREATE ({detail})."
+                    ) from exc
                 if read_only:
                     raise ConfigurationError(
                         f"Sync state is corrupt: {self.state_file} "
@@ -336,6 +360,16 @@ class StateManager:
                     file=sys.stderr,
                 )
         return self.state
+
+    def load_for_preview(self) -> None:
+        """A local preview cannot resolve the outcome of a pending CREATE."""
+        self.load(read_only=True)
+        if "pending_create" in self.state:
+            title = self.state["pending_create"]["title"]
+            raise ConfigurationError(
+                f"Run sync to recover the pending create for {title!r} "
+                "before previewing further changes."
+            )
     
     def save(self):
         """Acquire the board lock and save the current state atomically."""
@@ -346,6 +380,21 @@ class StateManager:
     def save_locked(self):
         """Checkpoint state while the caller holds the board lock."""
         atomic_write_json(str(self.state_file), self.state)
+
+    def begin_create(self, title: str) -> str:
+        """Checkpoint the intent under the board lock before sending CREATE."""
+        token = uuid4().hex
+        self.state["pending_create"] = {"title": title, "token": token}
+        self.save_locked()
+        return _create_marker(token)
+
+    def finish_create(self, item_id: str) -> None:
+        """Replace the intent with its binding in one locked checkpoint."""
+        if not isinstance(item_id, str) or not item_id:
+            raise GitHubAPIError("Missing item ID for pending create")
+        self.update_task(self.state["pending_create"]["title"], item_id, None)
+        del self.state["pending_create"]
+        self.save_locked()
     
     def verify_board_key(self, board_key: Optional[str]) -> None:
         """Guard the sync state against a copied / swapped board (ADR 0002).
@@ -602,6 +651,7 @@ class GitHubClient:
                     items.append({
                         "id": item["id"],
                         "title": item["content"]["title"],
+                        "body": item["content"].get("body") or "",
                         "status": status
                     })
             
@@ -699,6 +749,35 @@ class Syncer:
         with kanban_lock(str(self.state.kanban_file.parent)):
             self._sync_locked(owner, repo_name, project_number)
 
+    def _recover_pending_create(self, project_id: str) -> None:
+        pending = self.state.state.get("pending_create")
+        if pending is None:
+            return
+        saved_project = self.state.state["project_id"]
+        title = pending["title"]
+        if project_id != saved_project:
+            raise ConfigurationError(
+                f"The pending create for {title!r} belongs to Project {saved_project}. "
+                "Select that Project to recover the card before another CREATE."
+            )
+        marker = _create_marker(pending["token"])
+        matches = [
+            item["id"] for item in self.client.get_project_items(project_id)
+            if marker in item["body"].splitlines()
+        ]
+        if len(matches) != 1:
+            raise ConfigurationError(
+                f"Found {len(matches)} draft cards for the pending create of {title!r} "
+                f"in Project {project_id}. Reconcile {marker} before another CREATE."
+            )
+        item_id = matches[0]
+        if any(task["item_id"] == item_id for task in self.state.state["tasks"].values()):
+            raise ConfigurationError(
+                f"The card matching the pending create for {title!r} is already bound. "
+                f"Reconcile {marker} in Project {project_id} before another CREATE."
+            )
+        self.state.finish_create(item_id)
+
     def _sync_locked(
         self, owner: str, repo_name: str, project_number: Optional[int]
     ):
@@ -723,7 +802,8 @@ class Syncer:
         self.status_field_id = status_field_id
         self.status_options = status_options
         
-        # Update state with project info
+        # Resolve the previous run before planning, even if its task was removed.
+        self._recover_pending_create(project_id)
         self.state.set_project_info(repo_node_id, project_id)
         
         print(f"\nSynchronizing...")
@@ -740,16 +820,9 @@ class Syncer:
             if action == "CREATE":
                 # New task - create it
                 print(f"  [CREATE] {title} => {desired_status}")
-                item_id = self.client.create_draft_issue(project_id, title)
-                # D7+D12: persist item_id with status=None first. The
-                # confirmed status is only persisted AFTER the status
-                # update mutation succeeds. Prevents the stuck-no-status
-                # idempotency bug where a transient failure between
-                # create_draft_issue and update_item_status leaves state
-                # desynced from GH (state thinks status set; GH has none;
-                # next sync sees stored == desired and skips forever).
-                self.state.update_task(title, item_id, None)
-                self.state.save_locked()
+                marker = self.state.begin_create(title)
+                item_id = self.client.create_draft_issue(project_id, title, body=marker)
+                self.state.finish_create(item_id)
 
                 # Set initial status
                 if desired_status in self.status_options:
@@ -775,8 +848,7 @@ class Syncer:
                         file=sys.stderr,
                     )
             elif action == "UPDATE":
-                # Status changed (or first status set after a previous
-                # failed attempt — see D12 pattern above)
+                # A recovered card also needs its first confirmed status.
                 print(
                     f"  [UPDATE] {title}: {operation['from_status']} "
                     f"=> {desired_status}"
@@ -846,7 +918,7 @@ def _main():
 
     if args.dry_run:
         state = StateManager(args.kanban_file)
-        state.load(read_only=True)
+        state.load_for_preview()
         state.verify_board_key(read_board_key(args.kanban_file))
         print(json.dumps(build_sync_plan(
             _flatten_local_tasks(board.parse()), state.state["tasks"]
