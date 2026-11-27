@@ -18,14 +18,14 @@ intercepted the lookup and the target project's `.env` was never
 considered. `find_dotenv(usecwd=True)` makes the search start at
 `os.getcwd()` so the CWD-closest `.env` wins.
 
-Four complementary checks:
+Checks include:
   1. Importing the library leaves the process environment unchanged.
-  2. Source-level: the CLI loader uses `find_dotenv(usecwd=True)`
-     and `override=True`.
+  2. A nested workspace inherits its nearest ancestor's .env.
   3. Behaviour-level (B5): a subprocess run shows the `.env` value
      winning over a shell-exported value of the same name.
   4. Behaviour-level (usecwd): a subprocess run shows a child-dir
      `.env` winning over a parent-of-source-dir `.env`.
+  5. A Unix workspace FIFO takes precedence over an ancestor's file.
 """
 
 from __future__ import annotations
@@ -35,6 +35,8 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
+
+import pytest
 
 
 def test_importing_sync_kanban_does_not_load_dotenv(tmp_path: Path):
@@ -65,29 +67,52 @@ def test_importing_sync_kanban_does_not_load_dotenv(tmp_path: Path):
     assert result.stdout.strip() == "<unset>"
 
 
-def test_cli_dotenv_loader_keeps_override_and_cwd_lookup():
-    """Regression guard against accidentally dropping the override flag.
+def test_workspace_inherits_nearest_dotenv(tmp_path: Path, monkeypatch):
+    from sync_kanban import _load_cli_dotenv
 
-    Reads sync_kanban.py and asserts the call site uses both
-    `find_dotenv(usecwd=True)` and `override=True`. Cheap, doesn't
-    invoke the CLI loader, and makes the
-    intent obvious at code-review time.
-    """
-    source_root = Path(__file__).resolve().parent.parent
-    sync_src = (source_root / "sync_kanban.py").read_text(encoding="utf-8")
-    assert "find_dotenv(usecwd=True)" in sync_src, (
-        "sync_kanban.py must call find_dotenv(usecwd=True) so that the "
-        "search for `.env` starts at os.getcwd() rather than the caller "
-        "module's directory. Without it, a rogue parent-of-source-dir "
-        ".env can intercept the lookup and the target project's .env is "
-        "never considered. See follow-up to PR #1 (B5)."
+    monkeypatch.delenv("PYTHON_DOTENV_DISABLED", raising=False)
+    workspace = tmp_path / "parent" / "board"
+    workspace.mkdir(parents=True)
+    (tmp_path / ".env").write_text("GITHUB_REPO=distant/project\n", encoding="utf-8")
+    (workspace.parent / ".env").write_text(
+        "GITHUB_REPO=nearest/project\nGITHUB_TOKEN=\n", encoding="utf-8"
     )
-    assert "override=True" in sync_src, (
-        "sync_kanban.py must pass override=True so that the project's "
-        ".env is authoritative — without it, a stale shell-exported "
-        "GITHUB_REPO can silently route sync to the wrong project. See "
-        "INTEGRATION_REPORT entry B5."
-    )
+    monkeypatch.chdir(workspace)
+    monkeypatch.setenv("GITHUB_REPO", "shell/project")
+    monkeypatch.setenv("GITHUB_TOKEN", "shell-token")
+    _load_cli_dotenv()
+    assert os.environ["GITHUB_REPO"] == "nearest/project"
+    assert os.environ["GITHUB_TOKEN"] == ""
+    monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "true")
+    monkeypatch.setenv("GITHUB_REPO", "shell/project")
+    _load_cli_dotenv()
+    assert os.environ["GITHUB_REPO"] == "shell/project"
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires a Unix FIFO")
+def test_workspace_dotenv_fifo_wins_over_parent_file(tmp_path: Path, monkeypatch):
+    from sync_kanban import _load_cli_dotenv
+
+    workspace = tmp_path / "board"
+    workspace.mkdir()
+    (tmp_path / ".env").write_text("GITHUB_REPO=parent/project\n", encoding="utf-8")
+    os.mkfifo(workspace / ".env")
+    monkeypatch.chdir(workspace)
+    monkeypatch.delenv("PYTHON_DOTENV_DISABLED", raising=False)
+    monkeypatch.setenv("GITHUB_REPO", "shell/project")
+
+    # The writer waits for the worker to open the FIFO and closes it after one value.
+    writer = subprocess.Popen([
+        sys.executable, "-c",
+        "from pathlib import Path; Path('.env').write_text('GITHUB_REPO=board/project\\n')",
+    ])
+    try:
+        _load_cli_dotenv()
+        assert os.environ["GITHUB_REPO"] == "board/project"
+        assert writer.wait(timeout=5) == 0
+    finally:
+        writer.kill()
+        writer.wait()
 
 
 def test_cli_dotenv_override_actually_beats_shell_env(tmp_path: Path):
@@ -123,6 +148,7 @@ def test_cli_dotenv_override_actually_beats_shell_env(tmp_path: Path):
     )
 
     env = dict(os.environ)
+    env.pop("PYTHON_DOTENV_DISABLED", None)
     env["GITHUB_REPO"] = "from-shell/loser"
     env["PYTHONPATH"] = str(source_root) + os.pathsep + env.get("PYTHONPATH", "")
 
@@ -228,6 +254,7 @@ def test_dotenv_find_usecwd_beats_rogue_parent_env(tmp_path: Path):
     )
 
     env = dict(os.environ)
+    env.pop("PYTHON_DOTENV_DISABLED", None)
     # Strip the key from inherited env so we can detect whether .env
     # loading actually set it (and which file won).
     env.pop("KANBANGER_CWD_TEST", None)

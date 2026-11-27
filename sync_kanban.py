@@ -11,36 +11,27 @@ import shutil
 import argparse
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, NoReturn, Optional, Set, Tuple
 
 from kanban_io import (
     atomic_write_json,
+    extract_board_key,
     kanban_lock,
     parse_task_title_with_description,
     read_board_key,
 )
 
-# Load environment variables from .env file if it exists.
-# override=True: the project's `.env` is the authoritative target for
-# this sync run. Without it, a shell-level export (e.g. a stale
-# GITHUB_REPO=owner/other-project from another workspace's profile
-# script) silently shadows the `.env` value and routes the sync to
-# the wrong project — items get written into another repo's Project
-# instead of the intended one, with no error surfaced.
-# find_dotenv(usecwd=True): the default `find_dotenv()` walks upward
-# from the *caller module's file location* (i.e. this file's
-# directory), not from the user's CWD. When kanban-sync is invoked
-# from a target project, that lookup can latch onto a rogue
-# parent-of-source-directory `.env` (e.g. ~/Desktop/AI/.env) and the
-# target project's `.env` is never considered. usecwd=True makes the
-# search start at os.getcwd() so the CWD-closest `.env` wins.
+
 def _load_cli_dotenv() -> None:
-    """Load the CLI cwd's `.env`, where project values override the shell."""
+    """Load the worker's nearest .env with workspace settings taking precedence."""
     try:
         from dotenv import find_dotenv, load_dotenv
     except ImportError:
         return
-    load_dotenv(find_dotenv(usecwd=True), override=True)
+    try:
+        load_dotenv(find_dotenv(usecwd=True), override=True)
+    except (OSError, UnicodeError) as exc:
+        raise ConfigurationError(f"Could not load workspace .env: {exc}") from exc
 
 
 # GitHub GraphQL endpoint
@@ -75,6 +66,13 @@ class ProjectNotFoundError(KanbangerError):
 class ConfigurationError(KanbangerError):
     """Required configuration is missing or invalid: env var, file
     path, or runtime dependency."""
+
+
+def _split_repository(repo: str) -> tuple[str, str]:
+    parts = repo.split('/')
+    if len(parts) != 2 or not all(parts):
+        raise ConfigurationError("GITHUB_REPO must be 'owner/repo'")
+    return parts[0], parts[1]
 
 
 def build_sync_plan(
@@ -133,6 +131,7 @@ class LocalBoard:
     def __init__(self, file_path: str):
         self.file_path = file_path
         self.tasks: Dict[str, List[Dict]] = {}
+        self.board_key: Optional[str] = None
     
     def parse(self) -> Dict[str, List[Dict]]:
         """Parse a markdown kanban file and return tasks by column.
@@ -160,6 +159,7 @@ class LocalBoard:
                 f"Unable to read kanban board: {self.file_path} ({exc})"
             ) from exc
 
+        self.board_key = extract_board_key(content)
         tasks = {}
         seen_per_section: Dict[str, set] = {}
         current_section = None
@@ -220,6 +220,17 @@ class LocalBoard:
         return tasks
 
 
+def _unique_state_keys(pairs: list[tuple[str, object]]) -> dict:
+    record = dict(pairs)
+    if len(record) != len(pairs):
+        raise ValueError("duplicate keys in a sync state object")
+    return record
+
+
+def _reject_non_json_constant(value: str) -> NoReturn:
+    raise ValueError(f"invalid JSON number: {value}")
+
+
 class StateManager:
     """Manages the .kanban.json sidecar file for state tracking."""
     
@@ -253,7 +264,11 @@ class StateManager:
         if state_exists:
             try:
                 with open(self.state_file, 'r', encoding='utf-8') as f:
-                    loaded = json.load(f)
+                    loaded = json.load(
+                        f,
+                        object_pairs_hook=_unique_state_keys if read_only else None,
+                        parse_constant=_reject_non_json_constant if read_only else None,
+                    )
                 if not isinstance(loaded, dict):
                     raise ValueError("top-level JSON value is not an object")
                 tasks = loaded.get("tasks")
@@ -322,7 +337,9 @@ class StateManager:
             # schema_version; v0 and v1 are structurally identical, so
             # silently upgrade in-memory (next save persists the field).
             loaded_version = self.state.get("schema_version")
-            if loaded_version is None:
+            # Read-only checks must see an explicit null as stored. A normal
+            # sync still repairs it on the next save.
+            if "schema_version" not in self.state or (loaded_version is None and not read_only):
                 self.state["schema_version"] = SCHEMA_VERSION
             elif (
                 isinstance(loaded_version, (int, float))
@@ -349,7 +366,11 @@ class StateManager:
         """
         workspace = str(self.kanban_file.parent)
         with kanban_lock(workspace):
-            atomic_write_json(str(self.state_file), self.state)
+            self.save_locked()
+
+    def save_locked(self):
+        """Persist a checkpoint while the caller holds the workspace lock."""
+        atomic_write_json(str(self.state_file), self.state)
     
     def verify_board_key(self, board_key: Optional[str]) -> None:
         """Guard the sync state against a copied / swapped board (ADR 0002).
@@ -416,8 +437,24 @@ class StateManager:
         if task_title in self.state["tasks"]:
             del self.state["tasks"][task_title]
     
+    def verify_repository(self, repo_node_id: str) -> None:
+        """Keep tracked item IDs bound to their original repository."""
+        saved_id = self.state.get("repo_node_id")
+        if self.state["tasks"] and saved_id and saved_id != repo_node_id:
+            raise ConfigurationError(
+                "The configured repository differs from the one recorded in "
+                ".kanban.json. Use the repository that owns this sync state."
+            )
+
     def set_project_info(self, repo_node_id: str, project_id: str):
         """Set the repository and project IDs."""
+        self.verify_repository(repo_node_id)
+        saved_project = self.state.get("project_id")
+        if self.state["tasks"] and saved_project and saved_project != project_id:
+            raise ConfigurationError(
+                "Tracked items belong to a different Project. "
+                "Select the Project recorded in .kanban.json."
+            )
         self.state["repo_node_id"] = repo_node_id
         self.state["project_id"] = project_id
 
@@ -426,6 +463,8 @@ class GitHubClient:
     """Handles GitHub GraphQL API interactions."""
     
     def __init__(self, token: str):
+        if "\r" in token or "\n" in token:
+            raise ConfigurationError("The GitHub token contains a line break.")
         self.token = token
         self.headers = {
             "Authorization": f"Bearer {token}",
@@ -448,6 +487,9 @@ class GitHubClient:
                 json={"query": query, "variables": variables},
                 timeout=GITHUB_TIMEOUT_SEC,
             )
+        except self.requests.exceptions.InvalidHeader:
+            # Requests includes the rejected header value in the exception.
+            raise GitHubAPIError("GitHub API request failed: invalid request header") from None
         except self.requests.RequestException as exc:
             raise GitHubAPIError(f"GitHub API request failed: {exc}") from exc
         
@@ -472,6 +514,23 @@ class GitHubClient:
         
         return data
     
+    def get_repository_id(self, repo: str) -> str:
+        """Resolve the configured repository without enumerating Project items."""
+        owner, name = _split_repository(repo)
+        query = """
+        query($owner: String!, $repo: String!) {
+            repository(owner: $owner, name: $repo) { id }
+        }
+        """
+        result = self._query(query, {"owner": owner, "repo": name})
+        try:
+            repo_id = result["data"]["repository"]["id"]
+        except (KeyError, TypeError) as exc:
+            raise GitHubAPIError(f"Could not resolve repository {repo}") from exc
+        if not isinstance(repo_id, str) or not repo_id.strip():
+            raise GitHubAPIError(f"GitHub returned no repository ID for {repo}")
+        return repo_id
+
     def get_repo_project(self, owner: str, repo_name: str, project_number: Optional[int] = None) -> Tuple[str, str, str, Dict]:
         """
         Get project information via repository lookup.
@@ -637,6 +696,33 @@ class GitHubClient:
         data = self._query(mutation, variables)
         return data["data"]["addProjectV2DraftIssue"]["projectItem"]["id"]
     
+    def convert_draft_to_issue(self, item_id: str, repo_id: str) -> tuple[int, str]:
+        """Convert the tracked Project item and return its Issue number and URL."""
+        mutation = """
+        mutation($itemId: ID!, $repositoryId: ID!) {
+            convertProjectV2DraftIssueItemToIssue(input: {
+                itemId: $itemId, repositoryId: $repositoryId
+            }) {
+                item {
+                    id
+                    content { ... on Issue { number url } }
+                }
+            }
+        }
+        """
+        result = self._query(mutation, {"itemId": item_id, "repositoryId": repo_id})
+        try:
+            item = result["data"]["convertProjectV2DraftIssueItemToIssue"]["item"]
+            returned_id = item["id"]
+            number = item["content"]["number"]
+            url = item["content"]["url"]
+        except (KeyError, TypeError) as exc:
+            raise GitHubAPIError("GitHub did not confirm the converted Issue") from exc
+        if (returned_id != item_id or type(number) is not int
+                or not isinstance(url, str) or not url):
+            raise GitHubAPIError("GitHub did not confirm the Issue for the tracked item")
+        return number, url
+
     def update_item_status(self, project_id: str, item_id: str, status_field_id: str, status_option_id: str):
         """Update the status field of a project item."""
         mutation = """
@@ -694,11 +780,12 @@ class Syncer:
         self.status_options = {}
     
     def sync(self, repo: str, project_number: Optional[int] = None):
-        """Perform the full synchronization."""
-        parts = repo.split('/')
-        if len(parts) != 2 or not all(parts):
-            raise ConfigurationError("GITHUB_REPO must be 'owner/repo'")
-        owner, repo_name = parts
+        """Serialize the plan, GitHub mutations and checkpoints with conversion."""
+        with kanban_lock(str(self.state.kanban_file.parent)):
+            self._sync_locked(repo, project_number)
+
+    def _sync_locked(self, repo: str, project_number: Optional[int]):
+        owner, repo_name = _split_repository(repo)
         
         print(f"Parsing {self.board.file_path}...")
         local_tasks = self.board.parse()
@@ -710,7 +797,7 @@ class Syncer:
         # this state file belongs to a different board than the one on
         # disk (raises ConfigurationError). Unkeyed legacy boards skip the
         # check; a keyed board's key is adopted into state on first sync.
-        self.state.verify_board_key(read_board_key(self.board.file_path))
+        self.state.verify_board_key(self.board.board_key)
 
         print(f"Connecting to GitHub repository {repo}...")
         repo_node_id, project_id, status_field_id, status_options = self.client.get_repo_project(
@@ -746,7 +833,7 @@ class Syncer:
                 # desynced from GH (state thinks status set; GH has none;
                 # next sync sees stored == desired and skips forever).
                 self.state.update_task(title, item_id, None)
-                self.state.save()
+                self.state.save_locked()
 
                 # Set initial status
                 if desired_status in self.status_options:
@@ -756,7 +843,7 @@ class Syncer:
                     )
                     # Confirmed — persist status
                     self.state.update_task(title, item_id, desired_status)
-                    self.state.save()
+                    self.state.save_locked()
                 else:
                     # No matching Status option on the Project. Item is
                     # created with no Status; state stays at None so the
@@ -785,7 +872,7 @@ class Syncer:
                     )
                     # Confirmed — persist
                     self.state.update_task(title, item_id, desired_status)
-                    self.state.save()
+                    self.state.save_locked()
                 else:
                     # No matching Status option. Skip the update; state
                     # stays at stored_status. Sync will keep flagging
@@ -803,13 +890,13 @@ class Syncer:
                 self.state.remove_task(title)
                 # D7: persist after each archive so the local state matches
                 # the GH-side archive even if the loop is interrupted.
-                self.state.save()
+                self.state.save_locked()
 
         # End-of-loop save remains as a defensive flush; a no-op when
         # per-item saves already covered every mutation, but cheap and
         # keeps the existing "Sync complete" semantics intact.
         print(f"\nSaving state...")
-        self.state.save()
+        self.state.save_locked()
         print(f"Sync complete!")
 
 

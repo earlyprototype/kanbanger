@@ -13,6 +13,8 @@ import difflib
 import subprocess
 import threading
 from contextlib import redirect_stdout
+from collections.abc import Mapping
+from pathlib import Path
 from typing import Optional, Tuple
 from mcp.server.fastmcp import FastMCP
 
@@ -98,6 +100,17 @@ def _ok(**payload) -> str:
     coordination primitives use this richer shape.
     """
     return json.dumps({"success": True, **payload}, indent=2)
+
+
+def _missing_github_credentials(environ: Mapping[str, str]) -> Optional[str]:
+    for name, code in (("GITHUB_TOKEN", ERROR_MISSING_GITHUB_TOKEN),
+                       ("GITHUB_REPO", ERROR_MISSING_GITHUB_REPO)):
+        if not environ.get(name):
+            return _error(
+                code, f"{name} environment variable not set. "
+                "Run the `doctor` tool to diagnose sync configuration.",
+            )
+    return None
 
 
 def _classify_sync_stderr(stderr: str) -> str:
@@ -861,19 +874,8 @@ def register_tools(server: FastMCP):
                 return _error(ERROR_READ_FAILED, str(exc))
             return _ok(mode="preview", plan=plan)
 
-        # Check for required environment variables
-        if not os.getenv("GITHUB_TOKEN"):
-            return _error(
-                ERROR_MISSING_GITHUB_TOKEN,
-                "GITHUB_TOKEN environment variable not set. "
-                "Run the `doctor` tool to diagnose sync configuration.",
-            )
-        if not os.getenv("GITHUB_REPO"):
-            return _error(
-                ERROR_MISSING_GITHUB_REPO,
-                "GITHUB_REPO environment variable not set. "
-                "Run the `doctor` tool to diagnose sync configuration.",
-            )
+        if error := _missing_github_credentials(os.environ):
+            return error
         
         TIMEOUT_SEC = int(os.getenv("KANBANGER_SYNC_TIMEOUT_SEC", "60"))
 
@@ -945,6 +947,36 @@ def register_tools(server: FastMCP):
             stdout=stdout,
         )
     
+    @server.tool()
+    def convert_task_to_issue(title: str) -> str:
+        """Permanently convert one tracked Project draft to an Issue in GITHUB_REPO.
+
+        Use only on explicit request. Pass the exact tracked title shown by
+        get_sync_status(). Returns item_id, issue_number and issue_url.
+        """
+        if error := _missing_github_credentials(os.environ):
+            return error
+        try:
+            worker = subprocess.run(
+                [sys.executable, "-m", "kanbanger._conversion", get_workspace()],
+                cwd=Path(__file__).resolve().parents[1],
+                input=json.dumps(title), capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+                timeout=int(os.getenv("KANBANGER_SYNC_TIMEOUT_SEC", "60")),
+            )
+        except subprocess.TimeoutExpired:
+            return _error(
+                ERROR_SYNC_TIMEOUT, "Conversion timed out. Check the Project item before retrying."
+            )
+        except (OSError, ValueError) as exc:
+            return _error(ERROR_CONFIGURATION, str(exc))
+        if worker.returncode:
+            return _error(
+                ERROR_SYNC_SUBPROCESS_FAILED,
+                "Conversion worker failed. Check the Project item before retrying.",
+            )
+        return worker.stdout.strip()
+
     @server.tool()
     def get_sync_status() -> str:
         """

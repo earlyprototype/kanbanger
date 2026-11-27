@@ -43,6 +43,7 @@ Don't silently create it — tell the user and ask. If they agree, call the
 | `approve_done(title)` | Approve a REVIEW task to DONE (human action) |
 | `reject_review(title, reason)` | Send a REVIEW task back with feedback |
 | `sync_to_github(dry_run?)` | Push the board to its GitHub Project |
+| `convert_task_to_issue(title)` | Only on explicit request, permanently convert a tracked draft to an Issue. Use the exact title from `get_sync_status()`. |
 | `get_sync_status()` | Check sync state |
 | `setup_project()` | Provision this workspace (board scaffold, `.mcp.json`, touchpoints) — idempotent |
 

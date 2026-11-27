@@ -1,8 +1,28 @@
+import errno
 import sys
 
 import pytest
 
 import kanban_io
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows locking semantics")
+def test_workspace_lock_waits_past_windows_contention_timeout(tmp_path, monkeypatch):
+    import msvcrt
+
+    locking = msvcrt.locking
+    attempts = []
+
+    def busy_once(fd, mode, size):
+        attempts.append(mode)
+        if len(attempts) == 1:
+            raise OSError(errno.EDEADLOCK, "Lock held for ten seconds")
+        return locking(fd, mode, size)
+
+    monkeypatch.setattr(msvcrt, "locking", busy_once)
+    with kanban_io.kanban_lock(str(tmp_path)):
+        assert attempts == [msvcrt.LK_LOCK, msvcrt.LK_LOCK]
+    assert attempts[-1] == msvcrt.LK_UNLCK
 
 
 def _tempfiles(target):

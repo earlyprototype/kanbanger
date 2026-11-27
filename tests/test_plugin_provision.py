@@ -313,9 +313,9 @@ def test_mcp_invalid_install_mode_returns_configuration_error_without_writes(
     assert _snapshot(tmp_path) == before
 
 
-def test_mcp_install_mode_is_optional_on_existing_eleven_tool_surface():
+def test_mcp_install_mode_is_optional_on_existing_tool_surface():
     tools = asyncio.run(create_server().list_tools())
-    assert len(tools) == 11
+    assert len(tools) == 12
     setup = next(tool for tool in tools if tool.name == "setup_project")
     assert "install_mode" in setup.inputSchema["properties"]
     assert "install_mode" not in setup.inputSchema.get("required", [])

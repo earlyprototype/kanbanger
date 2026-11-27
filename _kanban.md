@@ -17,6 +17,7 @@
 ## DOING
 
 ## REVIEW
+*   [ ] Issue #35 — Convert a tracked Project draft into a GitHub Issue
 
 ## DONE
 

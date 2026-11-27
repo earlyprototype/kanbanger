@@ -16,6 +16,7 @@ Audit-driven foundation for tools.py mutations:
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -335,7 +336,15 @@ def kanban_lock(workspace: str) -> Iterator[None]:
             if os.fstat(fd).st_size == 0:
                 os.write(fd, b"\0")
                 os.lseek(fd, 0, os.SEEK_SET)
-            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            # LK_LOCK reports EDEADLOCK after ten seconds of contention.
+            # A sync can still own the lock while waiting for GitHub.
+            while True:
+                try:
+                    msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+                    break
+                except OSError as exc:
+                    if exc.errno != errno.EDEADLOCK:
+                        raise
             try:
                 yield
             finally:
