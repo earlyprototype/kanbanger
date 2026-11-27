@@ -1,8 +1,11 @@
 """Restart sync against the same offline Project after an interrupted CREATE."""
 
 import json
+import os
 
 import pytest
+import requests
+from urllib3.exceptions import MaxRetryError, NewConnectionError
 
 from sync_kanban import ConfigurationError, GitHubAPIError, GitHubClient, LocalBoard
 from sync_kanban import StateManager, Syncer
@@ -17,7 +20,7 @@ class DraftProject(GitHubClient):
     def get_repo_project(self, owner, repo, project_number):
         return "repo", self.project_id, "status", {"Todo": "todo-option"}
 
-    def _query(self, query, variables):
+    def _query(self, query, variables, **kwargs):
         assert variables["projectId"] == self.project_id
         if "addProjectV2DraftIssue" in query:
             item_id = f"card-{len(self.cards) + 1}"
@@ -51,6 +54,98 @@ def board(kanban_workspace):
 
 def sync(board, project):
     Syncer(LocalBoard(str(board)), StateManager(str(board)), project).sync("owner/repo")
+
+
+@pytest.mark.parametrize(("failure", "accepted"), [
+    (requests.ConnectTimeout("timed out"), False),
+    (requests.ConnectionError(MaxRetryError(None, "/", NewConnectionError(None, "refused"))), False),
+    (requests.ReadTimeout("timed out"), True),
+    (requests.ConnectionError("connection reset"), True),
+], ids=["connect-timeout", "connection-refused", "read-timeout", "connection-reset"])
+def test_retry_after_create_transport_failure(board, monkeypatch, failure, accepted):
+    project = DraftProject()
+    client = GitHubClient("offline")
+    monkeypatch.setattr(client, "get_repo_project", project.get_repo_project)
+
+    def fail_post(url, *, headers, json, **kwargs):
+        assert "addProjectV2DraftIssue" in json["query"]
+        if accepted:
+            project._query(json["query"], json["variables"])
+        raise failure
+
+    monkeypatch.setattr(requests, "post", fail_post)
+    with pytest.raises(GitHubAPIError):
+        sync(board, client)
+
+    saved = StateManager(str(board)).load()
+    assert saved["tasks"] == {}
+    if accepted:
+        assert list(project.cards) == ["card-1"]
+        assert saved["pending_create"]["title"] == "New"
+    else:
+        assert project.cards == {}
+        assert "pending_create" not in saved
+        assert not board.with_name(".kanban.json").exists()
+
+    sync(board, project)
+    assert list(project.cards) == ["card-1"]
+    saved = StateManager(str(board)).load()
+    assert saved["tasks"] == {"New": {"item_id": "card-1", "status": "Todo"}}
+    assert "pending_create" not in saved
+
+
+def test_unsent_create_preserves_previous_bindings_and_sync_time(board, monkeypatch):
+    state_file = board.with_name(".kanban.json")
+    bindings = {"Existing": {"item_id": "older-card", "status": "Todo"}}
+    state_file.write_text(json.dumps({"tasks": bindings}), encoding="utf-8")
+    os.utime(state_file, (1, 1))
+    previous_mtime = state_file.stat().st_mtime_ns
+    client = GitHubClient("offline")
+    monkeypatch.setattr(client, "get_repo_project", DraftProject().get_repo_project)
+
+    def refuse_create(url, *, headers, json, **kwargs):
+        assert "addProjectV2DraftIssue" in json["query"]
+        raise requests.ConnectTimeout("timed out")
+
+    monkeypatch.setattr(requests, "post", refuse_create)
+    with pytest.raises(GitHubAPIError):
+        sync(board, client)
+
+    saved = StateManager(str(board)).load()
+    assert saved["tasks"] == bindings
+    assert "pending_create" not in saved
+    assert state_file.stat().st_mtime_ns == previous_mtime
+
+
+def test_create_redirect_keeps_intent_if_the_first_request_reached_the_project(board, monkeypatch):
+    project = DraftProject()
+    client = GitHubClient("offline")
+    monkeypatch.setattr(client, "get_repo_project", project.get_repo_project)
+
+    def redirect(adapter, request, **kwargs):
+        if request.url.endswith("/redirected"):
+            raise requests.ConnectTimeout("redirect destination unavailable")
+        body = json.loads(request.body)
+        project._query(body["query"], body["variables"])
+        response = requests.Response()
+        response.status_code = 307
+        response.headers["Location"] = "/redirected"
+        response.request = request
+        response.url = request.url
+        response._content = b""
+        return response
+
+    with requests.Session() as session:
+        session.trust_env = False
+        monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", redirect)
+        monkeypatch.setattr(requests, "post", session.post)
+        with pytest.raises(GitHubAPIError):
+            sync(board, client)
+
+    assert StateManager(str(board)).load()["pending_create"]["title"] == "New"
+    sync(board, project)
+    assert list(project.cards) == ["card-1"]
+    assert StateManager(str(board)).load()["tasks"]["New"]["item_id"] == "card-1"
 
 
 @pytest.mark.parametrize("failure", ["response", "binding"])
@@ -115,14 +210,23 @@ def test_uncertain_create_stops_before_further_mutations(board, outcome):
 
 def test_failed_intent_write_prevents_create(board, monkeypatch):
     project = DraftProject()
+    syncer = Syncer(LocalBoard(str(board)), StateManager(str(board)), project)
 
     def disk_full(state):
         raise OSError("disk full")
 
-    monkeypatch.setattr(StateManager, "save_locked", disk_full)
-    with pytest.raises(OSError, match="disk full"):
-        sync(board, project)
+    with monkeypatch.context() as patch:
+        patch.setattr(StateManager, "save_locked", disk_full)
+        with pytest.raises(OSError, match="disk full"):
+            syncer.sync("owner/repo")
     assert project.cards == {}
+    assert not board.with_name(".kanban.json").exists()
+
+    syncer.sync("owner/repo")
+    assert list(project.cards) == ["card-1"]
+    saved = StateManager(str(board)).load()
+    assert saved["tasks"] == {"New": {"item_id": "card-1", "status": "Todo"}}
+    assert "pending_create" not in saved
 
 
 def test_preview_reports_pending_create_without_changing_state(board, registered_tools):

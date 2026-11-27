@@ -247,6 +247,8 @@ def atomic_write_text(
     content: str,
     encoding: str = "utf-8",
     newline: Optional[str] = None,
+    *,
+    mtime_ns: Optional[int] = None,
 ) -> None:
     """Write text to path atomically.
 
@@ -275,6 +277,8 @@ def atomic_write_text(
             f.write(content)
             f.flush()
             os.fsync(f.fileno())
+        if mtime_ns is not None:
+            os.utime(tmp_path, ns=(os.stat(tmp_path).st_atime_ns, mtime_ns))
         for attempt in range(_WINDOWS_REPLACE_ATTEMPTS):
             try:
                 os.replace(tmp_path, path)
@@ -294,9 +298,11 @@ def atomic_write_text(
         raise
 
 
-def atomic_write_json(path: str, data: object, indent: int = 2) -> None:
+def atomic_write_json(
+    path: str, data: object, indent: int = 2, *, mtime_ns: Optional[int] = None
+) -> None:
     """Atomic-write JSON. Same guarantees as atomic_write_text."""
-    atomic_write_text(path, json.dumps(data, indent=indent))
+    atomic_write_text(path, json.dumps(data, indent=indent), mtime_ns=mtime_ns)
 
 
 def _lock_path(workspace: str) -> str:

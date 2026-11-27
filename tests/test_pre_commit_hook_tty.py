@@ -27,6 +27,7 @@ the post-merge bug class alongside PRs #1 (override=True) and #2
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -160,6 +161,36 @@ def test_hook_file_exists():
         f"pre-commit hook not found at {HOOK_PATH}; tests below assume "
         f"its location and will spuriously fail without it."
     )
+
+
+def test_non_tty_pending_create_blocks_commit_despite_newer_state(tmp_path):
+    board = tmp_path / "_kanban.md"
+    board.write_text("## TODO\n* [ ] New\n", encoding="utf-8")
+    os.utime(board, (1, 1))
+    state = tmp_path / ".kanban.json"
+    state.write_text(json.dumps({
+        "tasks": {}, "project_id": "project",
+        "pending_create": {"title": "New", "token": "a" * 32},
+    }), encoding="utf-8")
+
+    result = _run_hook_without_tty(tmp_path)
+    assert result.returncode != 0
+    output = result.stdout + result.stderr
+    assert "pending create" in output.lower()
+    assert "kanban-sync" in output
+    assert "Kanban check passed" not in output
+
+
+def test_hook_accepts_synced_task_named_pending_create(tmp_path):
+    board = tmp_path / "_kanban.md"
+    board.write_text("## TODO\n* [ ] pending_create\n", encoding="utf-8")
+    os.utime(board, (1, 1))
+    (tmp_path / ".kanban.json").write_text(json.dumps({
+        "tasks": {"pending_create": {"item_id": "card-1", "status": "Todo"}},
+    }), encoding="utf-8")
+
+    result = _run_hook_without_tty(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_non_tty_never_synced_blocks_commit_without_hanging(

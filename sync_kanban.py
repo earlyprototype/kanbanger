@@ -9,9 +9,10 @@ import sys
 import json
 import shutil
 import argparse
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, Iterator, List, Optional, Set, Tuple
 from uuid import uuid4
 
 from kanban_io import (
@@ -67,6 +68,10 @@ class GitHubAPIError(KanbangerError):
     """A GitHub GraphQL/HTTP call failed: HTTP non-200, GraphQL
     error array, or a missing field that the GraphQL contract
     promised."""
+
+
+class GitHubRequestNotSent(GitHubAPIError):
+    """The connection failed before the request could reach GitHub."""
 
 
 class ProjectNotFoundError(KanbangerError):
@@ -231,7 +236,11 @@ class StateManager:
     def __init__(self, kanban_file_path: str):
         self.kanban_file = Path(kanban_file_path)
         self.state_file = self.kanban_file.parent / ".kanban.json"
-        self.state = {
+        self.state = self._empty_state()
+
+    @staticmethod
+    def _empty_state() -> Dict:
+        return {
             "schema_version": SCHEMA_VERSION,
             "repo_node_id": None,
             "project_id": None,
@@ -333,13 +342,7 @@ class StateManager:
                     f"the board as never-synced.",
                     file=sys.stderr,
                 )
-                self.state = {
-                    "schema_version": SCHEMA_VERSION,
-                    "repo_node_id": None,
-                    "project_id": None,
-                    "board_key": None,
-                    "tasks": {},
-                }
+                self.state = self._empty_state()
                 return self.state
             self.state = loaded
             # R8: backwards-compat. Pre-R8 state files have no
@@ -359,6 +362,8 @@ class StateManager:
                     f"recognised; unknown fields are preserved on save.",
                     file=sys.stderr,
                 )
+        else:
+            self.state = self._empty_state()
         return self.state
 
     def load_for_preview(self) -> None:
@@ -387,6 +392,27 @@ class StateManager:
         self.state["pending_create"] = {"title": title, "token": token}
         self.save_locked()
         return _create_marker(token)
+
+    @contextmanager
+    def create_intent(self, title: str) -> Iterator[str]:
+        """Roll back the locked checkpoint only if CREATE was never sent."""
+        try:
+            previous_mtime = self.state_file.stat().st_mtime_ns
+        except FileNotFoundError:
+            previous_mtime = None
+        marker = self.begin_create(title)
+        try:
+            yield marker
+        except GitHubRequestNotSent:
+            del self.state["pending_create"]
+            if previous_mtime is None:
+                self.state_file.unlink()
+            else:
+                # The hook uses this timestamp as the last sync time.
+                atomic_write_json(
+                    str(self.state_file), self.state, mtime_ns=previous_mtime
+                )
+            raise
 
     def finish_create(self, item_id: str) -> None:
         """Replace the intent with its binding in one locked checkpoint."""
@@ -484,7 +510,7 @@ class GitHubClient:
                 "requests not installed. Run: pip install requests"
             )
     
-    def _query(self, query: str, variables: Dict) -> Dict:
+    def _query(self, query: str, variables: Dict, *, allow_redirects: bool = True) -> Dict:
         """Execute a GraphQL query."""
         try:
             response = self.requests.post(
@@ -492,8 +518,22 @@ class GitHubClient:
                 headers=self.headers,
                 json={"query": query, "variables": variables},
                 timeout=GITHUB_TIMEOUT_SEC,
+                allow_redirects=allow_redirects,
             )
         except self.requests.RequestException as exc:
+            from urllib3.exceptions import MaxRetryError, NewConnectionError
+
+            # Requests wraps DNS and connection-refused failures in ConnectionError.
+            # Other connection errors can occur after the server accepts a mutation.
+            cause = exc.args[0] if exc.args else None
+            new_connection_failed = (
+                isinstance(cause, MaxRetryError)
+                and isinstance(cause.reason, NewConnectionError)
+            )
+            if not allow_redirects and (
+                isinstance(exc, self.requests.ConnectTimeout) or new_connection_failed
+            ):
+                raise GitHubRequestNotSent(f"GitHub API request failed: {exc}") from exc
             raise GitHubAPIError(f"GitHub API request failed: {exc}") from exc
         
         if response.status_code != 200:
@@ -680,7 +720,8 @@ class GitHubClient:
             "body": body
         }
         
-        data = self._query(mutation, variables)
+        # A timeout on a redirected POST says nothing about the original CREATE.
+        data = self._query(mutation, variables, allow_redirects=False)
         return data["data"]["addProjectV2DraftIssue"]["projectItem"]["id"]
     
     def update_item_status(self, project_id: str, item_id: str, status_field_id: str, status_option_id: str):
@@ -820,8 +861,8 @@ class Syncer:
             if action == "CREATE":
                 # New task - create it
                 print(f"  [CREATE] {title} => {desired_status}")
-                marker = self.state.begin_create(title)
-                item_id = self.client.create_draft_issue(project_id, title, body=marker)
+                with self.state.create_intent(title) as marker:
+                    item_id = self.client.create_draft_issue(project_id, title, body=marker)
                 self.state.finish_create(item_id)
 
                 # Set initial status

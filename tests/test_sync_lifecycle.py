@@ -327,7 +327,7 @@ def test_sync_executes_local_plan_without_remote_reconciliation(tmp_path, monkey
         def json(self):
             return self.payload
 
-    def fake_post(url, *, headers, json, timeout=None):
+    def fake_post(url, *, headers, json, timeout=None, allow_redirects=True):
         calls.append(json)
         query = json["query"]
         variables = json["variables"]
@@ -482,9 +482,27 @@ def test_sync_status_resource_reads_task_state_like_the_tool(tmp_path, monkeypat
     resource = json.loads(server.resources["github_sync_status"]())
     tool = json.loads(server.tools["get_sync_status"]())
 
+    assert resource["synced"] is True
     assert resource["synced_tasks"] == tool["synced_tasks"] == 2
     assert resource["local_task_titles"] == tool["github_items"] == ["One", "Two"]
     assert resource["github_item_ids"] == tool["github_item_ids"] == ["PVTI_one", "PVTI_two"]
+
+
+def test_sync_status_resource_reports_unresolved_first_create(kanban_workspace):
+    from kanbanger.resources import register_resources
+    from tests.conftest import _StubMCPServer
+
+    (kanban_workspace / ".kanban.json").write_text(json.dumps({
+        "tasks": {}, "project_id": "project",
+        "pending_create": {"title": "New", "token": "a" * 32},
+    }), encoding="utf-8")
+    server = _StubMCPServer()
+    register_resources(server)
+    status = json.loads(server.resources["github_sync_status"]())
+
+    assert status["synced"] is False
+    assert status["synced_tasks"] == 0
+    assert "pending create" in status["message"].lower()
 
 
 def test_github_client_uses_a_finite_request_timeout(monkeypatch):
@@ -499,7 +517,7 @@ def test_github_client_uses_a_finite_request_timeout(monkeypatch):
         def json():
             return {"data": {}}
 
-    def fake_post(url, *, headers, json, timeout=None):
+    def fake_post(url, *, headers, json, timeout=None, allow_redirects=True):
         received.append(timeout)
         return Response()
 

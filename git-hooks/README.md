@@ -9,7 +9,8 @@ Git hooks to enforce kanban usage in your repository.
 - Checks if `_kanban.md` exists
 - Warns if kanban has never been synced
 - Warns if kanban has unsaved changes (modified since last sync)
-- Blocks commit unless user confirms (optional override)
+- Allows a terminal user to override either warning
+- Blocks commits while a card creation is pending. Run `kanban-sync _kanban.md` to reconcile it.
 
 ### post-commit
 **Runs after every commit**
