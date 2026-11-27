@@ -32,8 +32,8 @@ from typing import Iterator, Optional, Tuple
 _LOCK_FILENAME = ".kanban.lock"
 _STATE_FILENAME = ".kanban.json"
 _KANBAN_FILENAME = "_kanban.md"
-_WINDOWS_REPLACE_ATTEMPTS = 5
-_WINDOWS_REPLACE_RETRY_DELAY_SECONDS = 0.05
+_WINDOWS_FILE_ATTEMPTS = 5
+_WINDOWS_FILE_RETRY_DELAY_SECONDS = 0.05
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +242,22 @@ def parse_task_title_with_description(
     return title, None
 
 
+def _retry_windows_file_operation(operation, *paths):
+    """Allow ordinary Windows readers up to 200 ms to release the file."""
+    for attempt in range(_WINDOWS_FILE_ATTEMPTS):
+        try:
+            return operation(*paths)
+        except PermissionError:
+            if sys.platform != "win32" or attempt == _WINDOWS_FILE_ATTEMPTS - 1:
+                raise
+            time.sleep(_WINDOWS_FILE_RETRY_DELAY_SECONDS)
+
+
+def unlink_with_retry(path: Path) -> None:
+    """Remove a file, retrying transient Windows sharing failures."""
+    _retry_windows_file_operation(os.unlink, path)
+
+
 def atomic_write_text(
     path: str,
     content: str,
@@ -267,29 +283,31 @@ def atomic_write_text(
     preserved byte-for-byte (e.g. the board-key mint into an existing
     board, ADR 0002).
     """
+    with _atomic_writer(path, "w", mtime_ns, encoding=encoding, newline=newline) as f:
+        f.write(content)
+
+
+def atomic_write_bytes(path: Path, content: bytes, *, mtime_ns: int) -> None:
+    """Restore the exact contents and modification time of a checkpoint."""
+    with _atomic_writer(path, "wb", mtime_ns) as f:
+        f.write(content)
+
+
+@contextmanager
+def _atomic_writer(path, mode, mtime_ns, **open_options):
     target_dir = os.path.dirname(os.path.abspath(path)) or "."
     fd, tmp_path = tempfile.mkstemp(
         prefix=os.path.basename(path) + ".tmp.",
         dir=target_dir,
     )
     try:
-        with os.fdopen(fd, "w", encoding=encoding, newline=newline) as f:
-            f.write(content)
+        with os.fdopen(fd, mode, **open_options) as f:
+            yield f
             f.flush()
             os.fsync(f.fileno())
         if mtime_ns is not None:
             os.utime(tmp_path, ns=(os.stat(tmp_path).st_atime_ns, mtime_ns))
-        for attempt in range(_WINDOWS_REPLACE_ATTEMPTS):
-            try:
-                os.replace(tmp_path, path)
-                break
-            except PermissionError:
-                if (
-                    sys.platform != "win32"
-                    or attempt == _WINDOWS_REPLACE_ATTEMPTS - 1
-                ):
-                    raise
-                time.sleep(_WINDOWS_REPLACE_RETRY_DELAY_SECONDS)
+        _retry_windows_file_operation(os.replace, tmp_path, path)
     except Exception:
         try:
             os.unlink(tmp_path)

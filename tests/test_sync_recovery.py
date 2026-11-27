@@ -2,11 +2,16 @@
 
 import json
 import os
+import socket
+import sys
+from contextlib import ExitStack
 
 import pytest
 import requests
-from urllib3.exceptions import MaxRetryError, NewConnectionError
+from urllib3.exceptions import MaxRetryError, NewConnectionError, ProtocolError
+from urllib3.exceptions import ProxyError as Urllib3ProxyError
 
+import kanban_io
 from sync_kanban import ConfigurationError, GitHubAPIError, GitHubClient, LocalBoard
 from sync_kanban import StateManager, Syncer
 
@@ -56,12 +61,46 @@ def sync(board, project):
     Syncer(LocalBoard(str(board)), StateManager(str(board)), project).sync("owner/repo")
 
 
+def retry_and_check_binding(board, project):
+    sync(board, project)
+    assert list(project.cards) == ["card-1"]
+    saved = StateManager(str(board)).load()
+    assert saved["tasks"] == {"New": {"item_id": "card-1", "status": "Todo"}}
+    assert "pending_create" not in saved
+
+
+def test_retry_after_https_proxy_dns_failure(board, monkeypatch):
+    project = DraftProject()
+    client = GitHubClient("offline")
+    monkeypatch.setattr(client, "get_repo_project", project.get_repo_project)
+
+    def offline_dns(host, *args, **kwargs):
+        assert host == "proxy.invalid"
+        raise socket.gaierror(socket.EAI_NONAME, "proxy DNS lookup failed")
+
+    monkeypatch.setattr(socket, "getaddrinfo", offline_dns)
+    with requests.Session() as session:
+        session.trust_env = False
+        session.proxies["https"] = "https://proxy.invalid:443"
+        monkeypatch.setattr(requests, "post", session.post)
+        with pytest.raises(GitHubAPIError) as failure:
+            sync(board, client)
+
+    assert isinstance(failure.value.__cause__, requests.exceptions.ProxyError)
+    assert not board.with_name(".kanban.json").exists()
+    retry_and_check_binding(board, project)
+
+
 @pytest.mark.parametrize(("failure", "accepted"), [
     (requests.ConnectTimeout("timed out"), False),
     (requests.ConnectionError(MaxRetryError(None, "/", NewConnectionError(None, "refused"))), False),
+    (requests.exceptions.ProxyError(
+        MaxRetryError(None, "/", Urllib3ProxyError("proxy reset", ProtocolError()))
+    ), True),
     (requests.ReadTimeout("timed out"), True),
     (requests.ConnectionError("connection reset"), True),
-], ids=["connect-timeout", "connection-refused", "read-timeout", "connection-reset"])
+], ids=["connect-timeout", "connection-refused", "proxy-reset",
+        "read-timeout", "connection-reset"])
 def test_retry_after_create_transport_failure(board, monkeypatch, failure, accepted):
     project = DraftProject()
     client = GitHubClient("offline")
@@ -87,17 +126,44 @@ def test_retry_after_create_transport_failure(board, monkeypatch, failure, accep
         assert "pending_create" not in saved
         assert not board.with_name(".kanban.json").exists()
 
-    sync(board, project)
-    assert list(project.cards) == ["card-1"]
-    saved = StateManager(str(board)).load()
-    assert saved["tasks"] == {"New": {"item_id": "card-1", "status": "Todo"}}
-    assert "pending_create" not in saved
+    retry_and_check_binding(board, project)
+
+
+@pytest.mark.parametrize("status", [401, 403, 502])
+def test_retry_after_create_http_error(board, monkeypatch, status):
+    project = DraftProject()
+    client = GitHubClient("offline")
+    monkeypatch.setattr(client, "get_repo_project", project.get_repo_project)
+
+    def failed_response(url, *, json, **kwargs):
+        assert "addProjectV2DraftIssue" in json["query"]
+        if status == 502:
+            project._query(json["query"], json["variables"])
+        response = requests.Response()
+        response.status_code = status
+        response._content = b""
+        return response
+
+    monkeypatch.setattr(requests, "post", failed_response)
+    with pytest.raises(GitHubAPIError, match=f"status {status}"):
+        sync(board, client)
+
+    if status == 502:
+        assert StateManager(str(board)).load()["pending_create"]["title"] == "New"
+    else:
+        assert not board.with_name(".kanban.json").exists()
+    retry_and_check_binding(board, project)
 
 
 def test_unsent_create_preserves_previous_bindings_and_sync_time(board, monkeypatch):
     state_file = board.with_name(".kanban.json")
     bindings = {"Existing": {"item_id": "older-card", "status": "Todo"}}
-    state_file.write_text(json.dumps({"tasks": bindings}), encoding="utf-8")
+    previous = {
+        "repo_node_id": "previous-repo", "project_id": "previous-project",
+        "tasks": bindings, "board_key": "original-board", "extra": ["preserve"],
+    }
+    checkpoint = (json.dumps(previous) + "\n").encode()
+    state_file.write_bytes(checkpoint)
     os.utime(state_file, (1, 1))
     previous_mtime = state_file.stat().st_mtime_ns
     client = GitHubClient("offline")
@@ -114,7 +180,30 @@ def test_unsent_create_preserves_previous_bindings_and_sync_time(board, monkeypa
     saved = StateManager(str(board)).load()
     assert saved["tasks"] == bindings
     assert "pending_create" not in saved
+    assert state_file.read_bytes() == checkpoint
     assert state_file.stat().st_mtime_ns == previous_mtime
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows file sharing")
+def test_first_create_rollback_waits_for_sidecar_reader(board, monkeypatch):
+    project = DraftProject()
+    client = GitHubClient("offline")
+    monkeypatch.setattr(client, "get_repo_project", project.get_repo_project)
+    state_file = board.with_name(".kanban.json")
+    with ExitStack() as readers:
+        def fail_before_send(url, *, json, **kwargs):
+            assert "addProjectV2DraftIssue" in json["query"]
+            readers.enter_context(state_file.open("rb"))
+            raise requests.ConnectTimeout("timed out")
+
+        monkeypatch.setattr(requests, "post", fail_before_send)
+        # Release the real read handle during the retry delay.
+        monkeypatch.setattr(kanban_io.time, "sleep", lambda delay: readers.close())
+        with pytest.raises(GitHubAPIError, match="timed out"):
+            sync(board, client)
+
+    assert not state_file.exists()
+    retry_and_check_binding(board, project)
 
 
 def test_create_redirect_keeps_intent_if_the_first_request_reached_the_project(board, monkeypatch):

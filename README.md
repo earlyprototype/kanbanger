@@ -307,9 +307,9 @@ Boards in separate directories can sync at the same time.
 
 Before creating a card, sync saves a `pending_create` record in `.kanban.json` and includes its unique token in a comment in the draft body. If the response is lost or the binding cannot be saved, the next sync looks for that comment in the recorded Project. A single match restores the item ID. Sync saves the ID before setting the status, so a failed status update retries against the same card.
 
-If the connection fails before CREATE is sent, sync clears the intent. Rerun sync after the connection is restored. While a create is pending, the pre-commit hook blocks the commit and `kanban://sync-status` reports `synced: false`.
+If CREATE fails during connection setup or GitHub rejects it with HTTP 401 or 403, sync restores the previous sidecar and its modification time. If no sidecar existed, sync removes the one it just wrote. Fix the connection or access problem and rerun sync.
 
-If recovery finds zero or multiple matches, sync stops. Inspect the draft bodies in the recorded Project. If the intended card exists, restore the reported comment on that card alone and rerun sync. If you have confirmed that the create never took effect, stop the hooks, remove only `pending_create` from `.kanban.json`, and rerun sync.
+While a create is pending, the pre-commit hook blocks the commit and `kanban://sync-status` reports `synced: false`. If recovery finds zero or multiple matches, sync stops. Inspect the draft bodies in the recorded Project. If the intended card exists, restore the reported comment on that card alone and rerun sync. If you have confirmed that the create never took effect, stop the hooks, remove only `pending_create` from `.kanban.json`, and rerun sync.
 
 ### The board-id marker
 

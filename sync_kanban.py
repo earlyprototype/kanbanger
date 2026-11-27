@@ -16,10 +16,12 @@ from typing import Dict, Iterator, List, Optional, Set, Tuple
 from uuid import uuid4
 
 from kanban_io import (
+    atomic_write_bytes,
     atomic_write_json,
     kanban_lock,
     parse_task_title_with_description,
     read_board_key,
+    unlink_with_retry,
 )
 
 # Load environment variables from .env file if it exists.
@@ -70,7 +72,11 @@ class GitHubAPIError(KanbangerError):
     promised."""
 
 
-class GitHubRequestNotSent(GitHubAPIError):
+class GitHubRequestNotExecuted(GitHubAPIError):
+    """The request failed before GitHub could apply the mutation."""
+
+
+class GitHubRequestNotSent(GitHubRequestNotExecuted):
     """The connection failed before the request could reach GitHub."""
 
 
@@ -395,23 +401,26 @@ class StateManager:
 
     @contextmanager
     def create_intent(self, title: str) -> Iterator[str]:
-        """Roll back the locked checkpoint only if CREATE was never sent."""
+        """Restore the previous checkpoint when CREATE could not take effect."""
         try:
-            previous_mtime = self.state_file.stat().st_mtime_ns
+            with self.state_file.open("rb") as checkpoint:
+                previous_mtime = os.fstat(checkpoint.fileno()).st_mtime_ns
+                previous_contents = checkpoint.read()
         except FileNotFoundError:
-            previous_mtime = None
+            previous_contents = None
         marker = self.begin_create(title)
         try:
             yield marker
-        except GitHubRequestNotSent:
-            del self.state["pending_create"]
-            if previous_mtime is None:
-                self.state_file.unlink()
+        except GitHubRequestNotExecuted:
+            if previous_contents is None:
+                unlink_with_retry(self.state_file)
             else:
-                # The hook uses this timestamp as the last sync time.
-                atomic_write_json(
-                    str(self.state_file), self.state, mtime_ns=previous_mtime
+                # In-memory metadata may already refer to a newly selected Project.
+                # The pre-commit hook also uses the checkpoint's modification time.
+                atomic_write_bytes(
+                    self.state_file, previous_contents, mtime_ns=previous_mtime
                 )
+            self.load()
             raise
 
     def finish_create(self, item_id: str) -> None:
@@ -521,26 +530,30 @@ class GitHubClient:
                 allow_redirects=allow_redirects,
             )
         except self.requests.RequestException as exc:
-            from urllib3.exceptions import MaxRetryError, NewConnectionError
+            from urllib3.exceptions import ConnectTimeoutError, MaxRetryError, ProxyError
 
-            # Requests wraps DNS and connection-refused failures in ConnectionError.
-            # Other connection errors can occur after the server accepts a mutation.
+            # A proxy can lose a response after forwarding CREATE. Only a
+            # failure to establish the connection proves it was never sent.
             cause = exc.args[0] if exc.args else None
-            new_connection_failed = (
-                isinstance(cause, MaxRetryError)
-                and isinstance(cause.reason, NewConnectionError)
-            )
+            if isinstance(cause, MaxRetryError):
+                cause = cause.reason
+            if isinstance(cause, ProxyError):
+                cause = cause.args[1] if len(cause.args) == 2 else None
             if not allow_redirects and (
-                isinstance(exc, self.requests.ConnectTimeout) or new_connection_failed
+                isinstance(exc, self.requests.ConnectTimeout)
+                or isinstance(cause, ConnectTimeoutError)
             ):
                 raise GitHubRequestNotSent(f"GitHub API request failed: {exc}") from exc
             raise GitHubAPIError(f"GitHub API request failed: {exc}") from exc
         
         if response.status_code != 200:
-            raise GitHubAPIError(
+            message = (
                 f"GitHub API returned status {response.status_code}: "
                 f"{response.text}"
             )
+            if not allow_redirects and response.status_code in (401, 403):
+                raise GitHubRequestNotExecuted(message)
+            raise GitHubAPIError(message)
 
         try:
             data = response.json()
