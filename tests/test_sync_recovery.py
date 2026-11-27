@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
 from threading import Event
@@ -53,7 +54,7 @@ class Project(GitHubClient):
         assert "node(id: $id)" in document
         item = next(item for item in self.items if item["id"] == variables["id"])
         return {"data": {"node": {"id": item["id"], "isArchived": item["archived"],
-                                  "content": {"__typename": "DraftIssue", "id": item["draft_id"],
+                                  "content": {"__typename": item.get("type", "DraftIssue"), "id": item["draft_id"],
                                               "title": item["title"], "body": item["body"]}}}}
 
 
@@ -138,6 +139,137 @@ def test_lost_legacy_state_never_adopts_an_unmarked_match(tmp_path):
             run(board, project, **options)
     assert project.writes == []
     assert not (tmp_path / ".kanban.json").exists()
+
+
+def test_converted_pre_marker_draft_blocks_create_after_state_loss(tmp_path):
+    board = tmp_path / "_kanban.md"
+    board_at(board, "## TODO\n* [ ] Converted\n")
+    project = Project()
+    item_id = project.create_draft_issue("project", "Converted", "Legacy notes")
+    state = tmp_path / ".kanban.json"
+    state.write_text(json.dumps({"tasks": {"Converted": {"item_id": item_id, "status": "Todo"}}}))
+    project.items[0].update(type="Issue", draft_id=None)
+    state.unlink()
+    project.writes.clear()
+    before = deepcopy(project.items)
+
+    for options in ({"recover": True, "preview": True}, {"recover": True}, {}):
+        with pytest.raises(ConfigurationError, match=f"{item_id}.*Converted"):
+            run(board, project, **options)
+    assert project.items == before
+    assert project.writes == [] and not state.exists()
+
+
+@pytest.mark.parametrize("notes", [
+    "Look for the prefix `<!-- kanbanger:item:` in the body.",
+    "<!-- kanbanger:item:... is the start of a marker in a draft.",
+])
+def test_documentation_issue_can_mention_the_marker_prefix(tmp_path, notes):
+    board = tmp_path / "_kanban.md"
+    board_at(board, "## TODO\n* [ ] New\n")
+    project = Project()
+    project.create_draft_issue("project", "Documentation", notes)
+    project.items[0].update(type="Issue", draft_id=None)
+    sentinel = deepcopy(project.items[0])
+    project.writes.clear()
+    preview = run(board, project, recover=True, preview=True)
+    assert preview["plan"]["summary"] == {"create": 1, "update": 0, "archive": 0}
+    run(board, project)
+    assert project.items[0] == sentinel
+    assert project.writes == [("create", "item-1"), ("mark", "item-1"), ("update", "item-1")]
+
+
+@pytest.mark.parametrize("initial", [None, b"{", b'{"tasks":{}}'])
+def test_sidecar_restored_during_scan_keeps_renamed_legacy_claim(tmp_path, monkeypatch, initial):
+    board = tmp_path / "_kanban.md"
+    board_at(board, "## TODO\n* [ ] Original\n")
+    project = Project()
+    item_id = project.create_draft_issue("project", "Renamed")
+    restored = json.dumps({"tasks": {"Original": {"item_id": item_id, "status": "Todo"}}}).encode()
+    path = tmp_path / ".kanban.json"
+    if initial is not None:
+        path.write_bytes(initial)
+    project.writes.clear()
+    inventory = project.get_project_items
+
+    def restore_sidecar(project_id):
+        items = inventory(project_id)
+        path.write_bytes(restored)
+        return items
+
+    with monkeypatch.context() as patch:
+        patch.setattr(project, "get_project_items", restore_sidecar)
+        with pytest.raises(ConfigurationError, match="(?i)(sidecar|state).*changed"):
+            run(board, project, recover=True)
+    assert path.read_bytes() == restored and not list(tmp_path.glob(".kanban.json.corrupt-*"))
+    with pytest.raises(ConfigurationError, match=item_id):
+        run(board, project)
+    assert project.writes == []
+
+
+def test_recovery_detects_sidecar_removal_during_scan(tmp_path, monkeypatch):
+    board = tmp_path / "_kanban.md"
+    board_at(board, "## TODO\n")
+    path = tmp_path / ".kanban.json"
+    path.write_bytes(b'{"tasks":{}}')
+    project = Project()
+
+    def remove_sidecar(project_id):
+        path.unlink()
+        return []
+
+    monkeypatch.setattr(project, "get_project_items", remove_sidecar)
+    with pytest.raises(ConfigurationError, match="(?i)(sidecar|state).*changed"):
+        run(board, project, recover=True)
+    assert not path.exists()
+
+
+def test_recovery_checks_the_displaced_sidecar(tmp_path, monkeypatch):
+    board = tmp_path / "_kanban.md"
+    board_at(board, "## TODO\n")
+    path = tmp_path / ".kanban.json"
+    path.write_bytes(b"{")
+    restored = b'{"tasks":{"Legacy":{"item_id":"legacy-id","status":"Todo"}}}'
+    rename = Path.rename
+
+    def restore_before_rename(source, target):
+        if source == path:
+            path.write_bytes(restored)
+        return rename(source, target)
+
+    monkeypatch.setattr(Path, "rename", restore_before_rename)
+    with pytest.raises(ConfigurationError, match="state changed"):
+        run(board, Project(), recover=True)
+    assert path.read_bytes() == restored
+    assert not list(tmp_path.glob(".kanban.json.*"))
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_recovery_never_replaces_a_restore_at_publication(tmp_path, monkeypatch, corrupt):
+    board = tmp_path / "_kanban.md"
+    board_at(board, "## TODO\n")
+    path = tmp_path / ".kanban.json"
+    if corrupt:
+        path.write_bytes(b"{")
+    restored = b'{"tasks":{"Legacy":{"item_id":"legacy-id","status":"Todo"}}}'
+    install = StateManager._install_if_absent
+
+    def restore_before_install(source, target):
+        if not path.exists():
+            path.write_bytes(restored)
+        install(source, target)
+
+    monkeypatch.setattr(StateManager, "_install_if_absent", staticmethod(restore_before_install))
+    with pytest.raises(ConfigurationError, match="state changed"):
+        run(board, Project(), recover=True)
+    assert path.read_bytes() == restored
+    displaced = tmp_path / ".kanban.json.recovering"
+    if corrupt:
+        assert displaced.read_bytes() == b"{"
+        with pytest.raises(ConfigurationError, match="Interrupted recovery"):
+            run(board, None)
+    else:
+        assert not displaced.exists()
 
 
 @pytest.mark.parametrize("damage", [
@@ -505,20 +637,24 @@ def test_cr_only_legacy_board_keeps_present_task_and_line_endings(tmp_path):
     (tmp_path / ".kanban.json").write_text(json.dumps({"tasks": {
         "Present": {"item_id": item_id, "status": "Todo"},
     }}))
-    assert run(board, project, recover=True, preview=True)["plan"]["summary"]["archive"] == 0
+    preview = run(board, project, recover=True, preview=True)
+    assert preview["plan"]["summary"]["archive"] == 0
+    assert "kanbanger init" in preview["board_key_guidance"]
+    with pytest.raises(ConfigurationError, match="board-id"):
+        run(board, project)
+    assert board.read_bytes() == source
+    # An operator installs the marker with the editor that owns the board.
+    keyed = source.replace(b"# Board\r", f"# Board\r<!-- kanbanger:board-id: {KEY} -->\r".encode())
+    board.write_bytes(keyed)
     run(board, project)
     assert not project.items[0]["archived"]
-    data = board.read_bytes()
-    lines = data.split(b"\r")
-    assert lines.pop(1).startswith(b"<!-- kanbanger:board-id:")
-    assert b"\r".join(lines) == source
-    assert b"\n" not in data
+    assert board.read_bytes() == keyed
     assert run(board, project, recover=True, preview=True)["owned"] == {"Present": item_id}
 
 
-def test_marker_insertion_preserves_edit_during_inventory(tmp_path, monkeypatch):
+def test_sync_detects_keyed_board_edit_during_inventory(tmp_path, monkeypatch):
     board = tmp_path / "_kanban.md"
-    source = b"# Board\r\n## TODO\r\n"
+    source = f"# Board\r\n<!-- kanbanger:board-id: {KEY} -->\r\n## TODO\r\n".encode()
     edited = source + b"* [ ] Added during sync\r\n"
     board.write_bytes(source)
     project = Project()
@@ -589,26 +725,86 @@ def test_lost_binding_refuses_first_of_two_projects(tmp_path, monkeypatch):
         syncer.sync("owner/repo", recover=True, preview=True)
 
 
-def test_board_edit_during_atomic_replace_retry_survives(tmp_path, monkeypatch):
-    import kanban_io
-
+@pytest.mark.parametrize("recover", [False, True])
+def test_editor_save_after_board_verification_survives(tmp_path, monkeypatch, recover):
     board = tmp_path / "_kanban.md"
-    board.write_bytes(b"# Board\n")
-    edited = b"# Board\n## TODO\n* [ ] New\n"
-    replace = os.replace
-    attempts = []
+    original = b"# Board\r\n## TODO\r\n* [ ] First task\r\n"
+    edited = original + b"* [ ] Saved by editor\r\n"
+    board.write_bytes(original)
+    project = Project()
+    verify = LocalBoard.verify_source
 
-    def busy_file(source, target):
-        if not attempts:
-            attempts.append(target)
-            monkeypatch.setattr(kanban_io.sys, "platform", "win32")
-            board.write_bytes(edited)
-            raise PermissionError("editor was saving")
-        replace(source, target)
+    def verify_then_save(local_board):
+        verify(local_board)
+        board.write_bytes(edited)
 
-    monkeypatch.setattr(os, "replace", busy_file)
-    with pytest.raises(ConfigurationError, match="(?i)board.*changed"):
-        run(board, Project(), recover=True)
+    monkeypatch.setattr(LocalBoard, "verify_source", verify_then_save)
+    error = None
+    try:
+        run(board, project, recover=recover)
+    except ConfigurationError as exc:
+        error = str(exc)
     assert board.read_bytes() == edited
+    assert error and "board-id" in error and "kanbanger init" in error
+    assert project.writes == []
     assert not (tmp_path / ".kanban.json").exists()
     assert not list(tmp_path.glob("_kanban.md.tmp.*"))
+
+
+@pytest.mark.parametrize("action", ["UPDATE", "ARCHIVE", "CREATE"])
+@pytest.mark.parametrize("change", [
+    "converted", "archived", "removed marker", "other board", "other title",
+    "other item", "unbound marker", "duplicated marker",
+])
+def test_changed_mutation_target_is_left_alone(tmp_path, monkeypatch, action, change):
+    board = tmp_path / "_kanban.md"
+    path = tmp_path / ".kanban.json"
+    project = Project()
+    board_at(board, "## TODO\n* [ ] One\n")
+
+    def change_target():
+        item, = project.items
+        if change == "converted":
+            item["type"] = "Issue"
+        elif change == "archived":
+            item["archived"] = True
+        else:
+            item["body"] = {
+                "removed marker": "Edited notes",
+                "other board": f"<!-- kanbanger:item:v2 {'b' * 32} 4f6e65 item-0 -->",
+                "other title": f"<!-- kanbanger:item:v2 {KEY} 54776f item-0 -->",
+                "other item": f"<!-- kanbanger:item:v2 {KEY} 4f6e65 item-1 -->",
+                "unbound marker": f"<!-- kanbanger:item:v1 {KEY} 4f6e65 -->",
+                "duplicated marker": item["body"] + "\n" + item["body"],
+            }[change]
+
+    if action == "CREATE":
+        mark = project.mark_draft
+
+        def change_after_mark(*args):
+            mark(*args)
+            change_target()
+
+        monkeypatch.setattr(project, "mark_draft", change_after_mark)
+    else:
+        run(board, project)
+        before = path.read_bytes()
+        project.writes.clear()
+        board_at(board, "## DONE\n* [ ] One\n" if action == "UPDATE" else "## TODO\n")
+        inventory = project.get_project_items
+
+        def change_after_inventory(project_id):
+            snapshot = inventory(project_id)
+            change_target()
+            return snapshot
+
+        monkeypatch.setattr(project, "get_project_items", change_after_inventory)
+
+    with pytest.raises(ConfigurationError, match="item-0"):
+        run(board, project)
+    if action == "CREATE":
+        assert project.writes == [("create", "item-0"), ("mark", "item-0")]
+        assert json.loads(path.read_bytes())["tasks"]["One"]["status"] is None
+    else:
+        assert project.writes == []
+        assert path.read_bytes() == before

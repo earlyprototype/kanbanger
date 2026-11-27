@@ -7,7 +7,7 @@ import re
 import os
 import sys
 import json
-import shutil
+import tempfile
 import argparse
 from contextlib import nullcontext
 from uuid import uuid4
@@ -16,18 +16,19 @@ from typing import Dict, List, Optional, Tuple
 
 from kanban_io import (
     MalformedSyncState,
+    RECOVERY_SUFFIX,
     StateClaimConflict,
     atomic_write_json,
-    atomic_write_text,
     extract_board_key,
-    insert_board_key,
-    load_sync_state,
-    mint_board_key,
+    parse_sync_state,
+    read_sync_state_bytes,
     kanban_lock,
     parse_task_title_with_description,
 )
 
-from kanban_recovery import OwnershipConflict, bind_marker, inspect_drafts, item_marker
+from kanban_recovery import (
+    OwnershipConflict, bind_marker, inspect_drafts, item_marker, require_bound_marker,
+)
 
 # Load environment variables from .env file if it exists.
 # override=True: the project's `.env` is the authoritative target for
@@ -265,6 +266,8 @@ class StateManager:
     def __init__(self, kanban_file_path: str):
         self.kanban_file = Path(kanban_file_path)
         self.state_file = self.kanban_file.parent / ".kanban.json"
+        self.displaced_file = self.state_file.with_suffix(RECOVERY_SUFFIX)
+        self.source: Optional[bytes] = None
         self.state = self.empty_state()
 
     @staticmethod
@@ -279,12 +282,23 @@ class StateManager:
             "tasks": {}
         }
 
-    def load(self, *, read_only: bool = False) -> Dict:
-        """Read state without modifying it. Only a missing file starts empty."""
+    def read_source(self) -> Optional[bytes]:
         try:
-            self.state = load_sync_state(self.state_file)
+            return read_sync_state_bytes(self.state_file)
         except FileNotFoundError:
-            self.state = self.empty_state()
+            return None
+        except (OSError, ValueError) as exc:
+            raise ConfigurationError(f"Unable to read sync state: {self.state_file} ({exc})") from exc
+
+    def verify_source(self):
+        if self.read_source() != self.source:
+            raise ConfigurationError("Sync state changed during the scan. Inspect the sidecar and retry.")
+
+    def load(self, *, read_only: bool = False) -> Dict:
+        """Parse a single snapshot so recovery can detect a concurrent restore."""
+        self.source = self.read_source()
+        try:
+            self.state = self.empty_state() if self.source is None else parse_sync_state(self.source)
         except StateClaimConflict as exc:
             raise ConfigurationError(
                 f"Ownership conflict: {exc}. Restore a known-good sidecar."
@@ -294,8 +308,6 @@ class StateManager:
                     and exc.version > SCHEMA_VERSION):
                 raise ConfigurationError("Sync state requires a newer version of Kanbanger") from exc
             raise CorruptStateError(self.state_file, exc) from exc
-        except OSError as exc:
-            raise ConfigurationError(f"Unable to read sync state: {self.state_file} ({exc})") from exc
         self.state.setdefault("schema_version", SCHEMA_VERSION)
         if self.state["schema_version"] > SCHEMA_VERSION:
             raise ConfigurationError("Sync state requires a newer version of Kanbanger")
@@ -308,16 +320,46 @@ class StateManager:
         with kanban_lock(str(self.kanban_file.parent)):
             self.save_unlocked()
 
-    def backup_corrupt_state(self) -> Path:
-        backup = self.state_file.with_suffix(f".json.corrupt-{uuid4().hex}")
+    @staticmethod
+    def _install_if_absent(source: Path, target: Path):
+        """Publish a complete file, refusing to replace an existing name."""
+        if os.name == "nt":
+            source.rename(target)  # Windows rename fails if the target exists.
+        else:
+            os.link(source, target)
+            source.unlink()
+
+    def save_recovered(self, *, corrupt: bool) -> Optional[Path]:
+        """Preserve the actual displaced file and publish only into an empty slot."""
         try:
-            with self.state_file.open("rb") as source, backup.open("xb") as dest:
-                shutil.copyfileobj(source, dest)
-                dest.flush()
-                os.fsync(dest.fileno())
+            with tempfile.TemporaryDirectory(dir=self.state_file.parent) as staging:
+                replacement = Path(staging) / self.state_file.name
+                atomic_write_json(str(replacement), self.state)
+                self.verify_source()
+                if self.source is not None:
+                    self.state_file.rename(self.displaced_file)
+                try:
+                    if self.source is not None and self.displaced_file.read_bytes() != self.source:
+                        raise ConfigurationError("Sync state changed before replacement. Retry recovery.")
+                    self._install_if_absent(replacement, self.state_file)
+                except BaseException:
+                    if self.source is not None:
+                        # If an editor restored another file here, retain both
+                        # versions for inspection and block the next sync.
+                        self._install_if_absent(self.displaced_file, self.state_file)
+                    raise
+                if self.source is not None:
+                    if corrupt:
+                        backup = self.state_file.with_suffix(f".json.corrupt-{uuid4().hex}")
+                        self.displaced_file.rename(backup)
+                        return backup
+                    self.displaced_file.unlink()
+        except FileExistsError as exc:
+            raise ConfigurationError("Sync state changed before replacement. Inspect the sidecar "
+                                     "and any .kanban.json.recovering file before retrying.") from exc
         except OSError as exc:
-            raise ConfigurationError(f"Could not preserve corrupt sync state: {exc}") from exc
-        return backup
+            raise ConfigurationError(f"Could not install recovered sync state: {exc}") from exc
+        return None
 
     def verify_board_key(self, board_key: Optional[str]) -> None:
         """Pair legacy state with its board and refuse a changed or lost key."""
@@ -406,12 +448,8 @@ class GitHubClient:
         
         return data
     
-    def get_repo_project(self, owner: str, repo_name: str, project_number: Optional[int] = None,
-                         bound_id: Optional[str] = None) -> Tuple[str, str, str, Dict]:
-        """
-        Get project information via repository lookup.
-        Returns: (repo_node_id, project_id, status_field_id, status_options)
-        """
+    def get_linked_projects(self, owner: str, repo_name: str) -> Tuple[str, List[Dict]]:
+        """Read every linked Project before selecting a target for sync or doctor."""
         query = """
         query($owner: String!, $repo: String!, $cursor: String) {
             repository(owner: $owner, name: $repo) {
@@ -457,13 +495,11 @@ class GitHubClient:
             if info["hasNextPage"] is not True or not cursor or cursor in cursors:
                 raise GitHubAPIError("GitHub API returned incomplete linked Projects")
             cursors.add(cursor)
-        repo_node_id = repo["id"]
-        
-        if not projects:
-            raise ProjectNotFoundError(
-                f"No projects found linked to {owner}/{repo_name}"
-            )
+        return repo["id"], projects
 
+    @staticmethod
+    def select_linked_project(projects, project_number=None, bound_id=None) -> Dict:
+        """Require one linked Project consistent with both selectors."""
         if project_number is not None:
             projects = [p for p in projects if p["number"] == project_number]
             if not projects:
@@ -475,7 +511,15 @@ class GitHubClient:
         if len(projects) != 1:
             raise ConfigurationError("Multiple linked Projects match. Select the original Project "
                                      "with --project or GITHUB_PROJECT_NUMBER.")
-        project = projects[0]
+        return projects[0]
+
+    def get_repo_project(self, owner: str, repo_name: str, project_number: Optional[int] = None,
+                         bound_id: Optional[str] = None) -> Tuple[str, str, str, Dict]:
+        """Return repository, Project, Status field and Status option IDs for sync."""
+        repo_node_id, projects = self.get_linked_projects(owner, repo_name)
+        if not projects:
+            raise ProjectNotFoundError(f"No projects found linked to {owner}/{repo_name}")
+        project = self.select_linked_project(projects, project_number, bound_id)
         if project_number is None:
             print(f"Info: Using project #{project['number']}: {project['title']}", file=sys.stderr)
 
@@ -568,8 +612,8 @@ class GitHubClient:
             except (KeyError, TypeError, ValueError) as exc:
                 raise GitHubAPIError(f"GitHub API returned an incomplete project inventory: {exc}") from exc
 
-    def mark_draft(self, item_id: str, expected_title: str, expected_body: str, body: str):
-        """Recheck the item and its text immediately before replacing the body."""
+    def _get_active_draft(self, item_id: str) -> Dict:
+        """Resolve a Project item to its current active draft content."""
         query = """
         query($id: ID!) {
             node(id: $id) {
@@ -585,7 +629,25 @@ class GitHubClient:
         draft = item.get("content") or {}
         if (item.get("id") != item_id or item.get("isArchived") is not False
                 or draft.get("__typename") != "DraftIssue" or not draft.get("id")
-                or draft.get("title") != expected_title or draft.get("body") != expected_body):
+                or not isinstance(draft.get("body"), str)):
+            raise ConfigurationError(
+                f"Ownership conflict: {item_id} is no longer a readable active draft. "
+                "Inspect it and retry."
+            )
+        return draft
+
+    def verify_owned_draft(self, item_id: str, board_key: str, title: str):
+        """Recheck ownership immediately before a status or archive mutation."""
+        draft = self._get_active_draft(item_id)
+        try:
+            require_bound_marker(draft["body"], board_key, title, item_id)
+        except OwnershipConflict as exc:
+            raise ConfigurationError(f"Ownership conflict: {item_id}: {exc}. Inspect it and retry.") from exc
+
+    def mark_draft(self, item_id: str, expected_title: str, expected_body: str, body: str):
+        """Recheck the item and its text immediately before replacing the body."""
+        draft = self._get_active_draft(item_id)
+        if draft.get("title") != expected_title or draft["body"] != expected_body:
             raise ConfigurationError(f"Draft {item_id} changed during sync. Inspect it and retry.")
         draft_id = draft["id"]
         mutation = """
@@ -695,11 +757,11 @@ class Syncer:
         local = _flatten_local_tasks(self.board.parse())
         board_key = self.board.board_key
 
-        state_kind = "valid" if self.state.state_file.exists() else "missing"
         state_error = None
         damaged_claims = {}
         try:
             self.state.load()
+            state_kind = "missing" if self.state.source is None else "valid"
         except CorruptStateError as exc:
             if not recover:
                 raise
@@ -723,6 +785,7 @@ class Syncer:
             )
         except OwnershipConflict as exc:
             raise ConfigurationError(f"Ownership conflict: {exc}") from exc
+        self.state.verify_source()
         for item_id, title in sorted(damaged_claims.items()):
             if inventory.tasks.get(title, {}).get("item_id") != item_id:
                 raise ConfigurationError(f"Ownership conflict: cannot verify corrupt sidecar "
@@ -735,6 +798,12 @@ class Syncer:
 
         plan = build_sync_plan(local, inventory.tasks)
         self.state.state["tasks"] = inventory.tasks
+        marker_guidance = (
+            "Sync and recovery require a board-id marker to apply changes. "
+            "Restore the original marker if this board was previously keyed. "
+            "For a never-keyed board, run kanbanger init or setup_project with "
+            "the board closed, or add a board-id marker with a fresh UUID in your editor."
+        )
         if recover:
             report = {
                 "state": state_kind, "board_key": board_key, "project_id": project_id,
@@ -746,20 +815,17 @@ class Syncer:
             if state_error:
                 report["state_error"] = state_error
             if preview:
+                if board_key is None:
+                    report["board_key_guidance"] = marker_guidance
                 return report
 
+        self.board.verify_source()
         if board_key is None:
-            board_key = mint_board_key()
-            atomic_write_text(self.board.file_path, insert_board_key(self.board.source, board_key),
-                              newline="", before_replace=self.board.verify_source)
-            self.state.verify_board_key(board_key)
-        else:
-            self.board.verify_source()
+            raise ConfigurationError(marker_guidance)
         if recover:
-            if state_kind == "corrupt":
-                report["backup"] = str(self.state.backup_corrupt_state())
-            self.state.save_unlocked()
-            report["board_key"] = board_key
+            backup = self.state.save_recovered(corrupt=state_kind == "corrupt")
+            if backup is not None:
+                report["backup"] = str(backup)
             return report
 
         # A valid legacy sidecar supplies the item IDs for this migration.
@@ -796,6 +862,7 @@ class Syncer:
 
                 # Set initial status
                 if desired_status in status_options:
+                    self.client.verify_owned_draft(item_id, board_key, title)
                     self.client.update_item_status(
                         project_id, item_id, status_field_id,
                         status_options[desired_status]
@@ -825,6 +892,7 @@ class Syncer:
                     f"=> {desired_status}"
                 )
                 if desired_status in status_options:
+                    self.client.verify_owned_draft(item_id, board_key, title)
                     self.client.update_item_status(
                         project_id, item_id, status_field_id,
                         status_options[desired_status]
@@ -845,6 +913,7 @@ class Syncer:
                     )
             else:  # ARCHIVE
                 print(f"  [ARCHIVE] {title}")
+                self.client.verify_owned_draft(item_id, board_key, title)
                 self.client.archive_item(project_id, item_id)
                 self.state.remove_task(title)
                 # D7: persist after each archive so the local state matches

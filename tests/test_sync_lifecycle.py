@@ -19,6 +19,9 @@ from sync_kanban import (
 )
 
 
+KEYED_HEADER = "# Board\n<!-- kanbanger:board-id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->\n"
+
+
 def test_build_sync_plan_orders_local_changes_before_removed_state():
     """A missing action or wrong status direction corrupts the remote board."""
     local = {"New": "Todo", "Moved": "Review"}
@@ -302,7 +305,7 @@ def test_sync_migrates_legacy_ids_and_executes_local_plan(tmp_path, monkeypatch)
     """Fetch both pages and mark the two known drafts before applying the plan."""
     board_path = tmp_path / "_kanban.md"
     board_path.write_text(
-        "# Board\n\n## TODO\n* [ ] New\n\n## REVIEW\n* [ ] Moved\n",
+        KEYED_HEADER + "\n## TODO\n* [ ] New\n\n## REVIEW\n* [ ] Moved\n",
         encoding="utf-8",
     )
     state = StateManager(str(board_path))
@@ -312,6 +315,7 @@ def test_sync_migrates_legacy_ids_and_executes_local_plan(tmp_path, monkeypatch)
     }
     state.save()
     calls = []
+    bodies = {"Moved": "Existing notes", "Removed": "Existing notes"}
 
     class Response:
         status_code = 200
@@ -350,7 +354,7 @@ def test_sync_migrates_legacy_ids_and_executes_local_plan(tmp_path, monkeypatch)
                 "nodes": [{
                     "id": "PVTI_" + title.lower(), "isArchived": False,
                     "content": {"__typename": "DraftIssue", "id": "draft-" + title,
-                                "title": title, "body": "Existing notes"},
+                                "title": title, "body": bodies[title]},
                     "fieldValueByName": None,
                 }, {
                     "id": "unrelated-" + title, "isArchived": False,
@@ -361,19 +365,16 @@ def test_sync_migrates_legacy_ids_and_executes_local_plan(tmp_path, monkeypatch)
         if "node(id: $id)" in query:
             item_id = variables["id"]
             title = item_id.removeprefix("PVTI_").title()
-            body = "Existing notes"
-            if title == "New":
-                body = next(call["variables"]["body"] for call in calls
-                            if "addProjectV2DraftIssue" in call["query"])
             return Response({"data": {"node": {"id": item_id, "isArchived": False,
                 "content": {"__typename": "DraftIssue", "id": "draft-" + title,
-                            "title": title, "body": body}}}})
+                            "title": title, "body": bodies[title]}}}})
         if "updateProjectV2DraftIssue" in query:
             title = variables["id"].removeprefix("draft-")
             assert title in ("Moved", "Removed", "New")
             prefix = "" if title == "New" else "Existing notes\n\n"
             assert variables["body"].startswith(prefix + "<!-- kanbanger:item:v2 ")
             assert variables["body"].endswith(" PVTI_" + title.lower() + " -->")
+            bodies[title] = variables["body"]
             return Response({"data": {"updateProjectV2DraftIssue": {
                 "draftIssue": {"id": variables["id"]}
             }}})
@@ -381,6 +382,7 @@ def test_sync_migrates_legacy_ids_and_executes_local_plan(tmp_path, monkeypatch)
             assert variables["projectId"] == "PVT_project"
             assert variables["title"] == "New"
             assert variables["body"].startswith("<!-- kanbanger:item:v1 ")
+            bodies["New"] = variables["body"]
             return Response({"data": {"addProjectV2DraftIssue": {
                 "projectItem": {"id": "PVTI_new"}
             }}})
@@ -418,7 +420,7 @@ def test_created_item_is_durable_before_initial_status_failure(tmp_path):
     """A failed status mutation must retry UPDATE, not create a duplicate item."""
     board_path = tmp_path / "_kanban.md"
     board_path.write_text(
-        "# Board\n\n## TODO\n* [ ] New\n", encoding="utf-8"
+        KEYED_HEADER + "\n## TODO\n* [ ] New\n", encoding="utf-8"
     )
 
     class Client:
@@ -437,6 +439,10 @@ def test_created_item_is_durable_before_initial_status_failure(tmp_path):
         @staticmethod
         def mark_draft(item_id, title, expected, body):
             assert item_id == "PVTI_new" and item_id in body
+
+        @staticmethod
+        def verify_owned_draft(item_id, board_key, title):
+            assert (item_id, title) == ("PVTI_new", "New")
 
         @staticmethod
         def update_item_status(*args):
@@ -461,7 +467,7 @@ def test_created_item_is_durable_before_initial_status_failure(tmp_path):
 def test_archive_failure_keeps_state_for_retry(tmp_path):
     """A failed archive must leave its item ID durable for the next sync."""
     board_path = tmp_path / "_kanban.md"
-    board_path.write_text("# Board\n\n## TODO\n", encoding="utf-8")
+    board_path.write_text(KEYED_HEADER + "\n## TODO\n", encoding="utf-8")
     state = StateManager(str(board_path))
     state.state["tasks"] = {
         "Removed": {"item_id": "PVTI_removed", "status": "Done"}
@@ -485,6 +491,10 @@ def test_archive_failure_keeps_state_for_retry(tmp_path):
         @staticmethod
         def mark_draft(item_id, title, expected, body):
             assert item_id == "PVTI_removed"
+
+        @staticmethod
+        def verify_owned_draft(item_id, board_key, title):
+            assert (item_id, title) == ("PVTI_removed", "Removed")
 
     with pytest.raises(GitHubAPIError, match="archive failed"):
         Syncer(

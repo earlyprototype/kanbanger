@@ -11,6 +11,12 @@ class OwnershipConflict(ValueError):
 
 
 _PREFIX = "<!-- kanbanger:item:"
+# A marker line or an embedded, board-specific claim deserves inspection.
+# Quoting the comment prefix in prose does not claim a Project item.
+_CLAIM = re.compile(
+    rf"^[ \t]*{_PREFIX}v\d+\b|{_PREFIX}[\w-]+[ \t]+{BOARD_KEY_PATTERN}(?=\s|-->|$)",
+    re.MULTILINE,
+)
 _MARKER = re.compile(
     rf"<!-- kanbanger:item:(v1|v2) ({BOARD_KEY_PATTERN}) ([0-9a-f]+)"
     r"(?: ([A-Za-z0-9_+/=-]+))? -->"
@@ -29,17 +35,21 @@ def item_marker(board_key: str, title: str, item_id: str | None = None) -> str:
 def bind_marker(body: str, board_key: str, title: str, item_id: str) -> str:
     """Append a bound marker or replace the verified provisional footer."""
     marker = item_marker(board_key, title, item_id)
-    if _PREFIX in body:
-        return body.replace(item_marker(board_key, title), marker, 1)
+    provisional = item_marker(board_key, title)
+    if provisional in body:
+        return body.replace(provisional, marker, 1)
     return body + "\n\n" + marker if body else marker
 
 
-def _read_marker(body: str):
+def _read_marker(body: str, *, recorded: bool = False):
     if _PREFIX not in body:
+        return None
+    claims = _CLAIM.findall(body)
+    if not claims and not recorded:
         return None
     footer = body.rstrip().rsplit("\n", 1)[-1]
     match = _MARKER.fullmatch(footer)
-    if match and body.count(_PREFIX) == 1:
+    if match and len(claims) == 1:
         version, board_key, encoded, item_id = match.groups()
         try:
             title = bytes.fromhex(encoded).decode("utf-8")
@@ -50,6 +60,12 @@ def _read_marker(body: str):
                     and title.strip() and "\n" not in title and "\r" not in title):
                 return board_key, title, item_id
     raise OwnershipConflict("invalid or multiple ownership markers")
+
+
+def require_bound_marker(body: str, board_key: str, title: str, item_id: str):
+    """Verify the current body still identifies this board, task and Project item."""
+    if _read_marker(body) != (board_key, title, item_id):
+        raise OwnershipConflict(f"expected bound ownership marker for {title!r}")
 
 
 @dataclass
@@ -74,7 +90,7 @@ def inspect_drafts(items, board_key, stored, local, *, recover):
             continue
         stored_title = by_id.get(item_id)
         try:
-            marker = _read_marker(item["body"])
+            marker = _read_marker(item["body"], recorded=stored_title is not None)
         except OwnershipConflict as exc:
             conflicts.append(f"{item_id}: {exc}")
             continue
@@ -106,6 +122,10 @@ def inspect_drafts(items, board_key, stored, local, *, recover):
         elif item.get("type") == "Issue":
             if stored_title is not None:
                 conflicts.append(f"{item_id}: recorded draft is now a repository issue")
+            elif item["title"] in local:
+                # Conversion retains the Project item ID. A pre-marker draft
+                # can now look exactly like an independently created issue.
+                result.unmarked[item_id] = item["title"]
             continue
         elif stored_title is not None:
             title = stored_title
@@ -134,7 +154,7 @@ def inspect_drafts(items, board_key, stored, local, *, recover):
         conflicts.append(f"{item_id}: cannot verify the recorded draft for {by_id[item_id]!r}")
     for item_id, title in result.unmarked.items():
         if title in local and title not in result.tasks:
-            conflicts.append(f"{item_id}: unmarked draft matches {title!r}. Restore the "
+            conflicts.append(f"{item_id}: unmarked Project item matches {title!r}. Restore the "
                              "original sidecar or resolve the title collision on GitHub")
     if conflicts:
         raise OwnershipConflict("\n".join(sorted(set(conflicts))))

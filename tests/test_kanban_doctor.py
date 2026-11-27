@@ -18,6 +18,7 @@ import subprocess
 import sys
 from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -50,6 +51,14 @@ def _run_doctor(workspace: Path) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
     )
+
+
+def test_doctor_flags_sidecar_displaced_by_interrupted_recovery(tmp_path):
+    import kanban_doctor
+
+    (tmp_path / ".kanban.json.recovering").write_bytes(b'{"tasks":{}}')
+    out, counts = _capture_check(kanban_doctor.check_state_file, tmp_path)
+    assert counts["fail"] == 1 and ".kanban.json.recovering" in out
 
 
 def test_doctor_module_importable():
@@ -226,6 +235,67 @@ def test_status_field_passes_on_full_five_column_project(monkeypatch: pytest.Mon
     )
     assert counts["pass"] == 1, out
     assert "all five" in out
+
+
+@pytest.mark.parametrize(
+    ("number", "sidecar", "status", "message"),
+    [
+        (None, None, "FAIL", "GITHUB_PROJECT_NUMBER"),
+        ("8", None, "PASS", "Release"),
+        (None, {"board_key": "board-123", "repo_node_id": "R", "project_id": "P8"},
+         "PASS", "Release"),
+        ("11", {"project_id": "P8"}, "FAIL", "P8"),
+        (None, {"project_id": "unlinked"}, "FAIL", "unlinked"),
+        (None, {"repo_node_id": "other", "project_id": "P8"}, "FAIL", "repo_node_id"),
+        (None, {"board_key": "other-board", "project_id": "P8"}, "FAIL", "different board"),
+        (None, {"project_id": "P8", "tasks": []}, "FAIL", "corrupt"),
+        ("bad", None, "FAIL", "integer"),
+        ("99", None, "FAIL", "99"),
+    ],
+)
+def test_doctor_selects_linked_project_across_pages(
+    tmp_path, monkeypatch, number, sidecar, status, message,
+):
+    import requests
+    import kanban_doctor
+
+    board = tmp_path / "_kanban.md"
+    board.write_text("<!-- kanbanger:board-id: board-123 -->\n" + VALID_BOARD, encoding="utf-8")
+    state = tmp_path / ".kanban.json"
+    if sidecar is not None:
+        state.write_text(json.dumps({"tasks": {}, **sidecar}), encoding="utf-8")
+    before = state.read_bytes() if state.exists() else None
+    _set_doctor_env(monkeypatch, tmp_path)
+    monkeypatch.delenv("GITHUB_PROJECT_NUMBER", raising=False)
+    if number:
+        (tmp_path / ".env").write_text(f"GITHUB_PROJECT_NUMBER={number}\n", encoding="utf-8")
+
+    def post(url, *, headers, json, timeout):
+        document = json["query"]
+        if "viewer" in document:
+            data = {"viewer": {"login": "tester"}}
+        elif "projectsV2" in document:
+            second_page = json["variables"].get("cursor") == "next"
+            n, title = (8, "Release") if second_page else (11, "Triage")
+            options = [{"name": name, "id": name} for name in
+                       ("Backlog", "Todo", "InProgress", "Review", "Done")]
+            node = {"id": f"P{n}", "number": n, "title": title, "fields": {"nodes": [
+                {"id": "field", "name": "Status", "options": options}
+            ]}}
+            data = {"repository": {"id": "R", "projectsV2": {
+                "nodes": [node],
+                "pageInfo": {"hasNextPage": not second_page, "endCursor": "next"},
+            }}}
+        else:
+            data = {"repository": {"id": "R", "name": "repo"}}
+        return SimpleNamespace(status_code=200, json=lambda: {"data": data})
+
+    monkeypatch.setattr(requests, "post", post)
+    report = kanban_doctor.run_doctor(tmp_path)
+    check = next(r for r in report.results if r.name == "Project Status field has required options")
+    assert check.status == status, check
+    assert message in f"{check.detail} {check.remediation}", check
+    assert (state.read_bytes() if state.exists() else None) == before
 
 
 # --- issue #22: dist rename (kanbanger-partymix -> kanbanger) --------------

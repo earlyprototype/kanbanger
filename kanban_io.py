@@ -25,11 +25,12 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable, Iterator, Optional, Tuple
+from typing import Iterator, Optional, Tuple
 
 
 _LOCK_FILENAME = ".kanban.lock"
 _STATE_FILENAME = ".kanban.json"
+RECOVERY_SUFFIX = ".json.recovering"
 _KANBAN_FILENAME = "_kanban.md"
 _WINDOWS_REPLACE_ATTEMPTS = 5
 _WINDOWS_REPLACE_RETRY_DELAY_SECONDS = 0.05
@@ -245,8 +246,6 @@ def atomic_write_text(
     content: str,
     encoding: str = "utf-8",
     newline: Optional[str] = None,
-    *,
-    before_replace: Optional[Callable[[], None]] = None,
 ) -> None:
     """Write text to path atomically.
 
@@ -264,9 +263,6 @@ def atomic_write_text(
     pass "" for no translation when the content's own line endings must be
     preserved byte-for-byte (e.g. the board-key mint into an existing
     board, ADR 0002).
-
-    Call before_replace immediately before each replacement attempt so a
-    caller can refuse to overwrite a changed source.
     """
     target_dir = os.path.dirname(os.path.abspath(path)) or "."
     fd, tmp_path = tempfile.mkstemp(
@@ -279,8 +275,6 @@ def atomic_write_text(
             f.flush()
             os.fsync(f.fileno())
         for attempt in range(_WINDOWS_REPLACE_ATTEMPTS):
-            if before_replace is not None:
-                before_replace()
             try:
                 os.replace(tmp_path, path)
                 break
@@ -395,8 +389,22 @@ class MalformedSyncState(ValueError):
         self.claims = claims
 
 
+def read_sync_state_bytes(path: Path) -> bytes:
+    """An interrupted replacement must not look like an empty sync history."""
+    displaced = path.with_suffix(RECOVERY_SUFFIX)
+    if displaced.exists():
+        raise ValueError(f"Interrupted recovery. Inspect {displaced} and restore the "
+                         f"intended {path.name} before retrying.")
+    return path.read_bytes()
+
+
 def load_sync_state(path: Path) -> dict:
     """Read the sidecar with the same structural checks for sync and doctor."""
+    return parse_sync_state(read_sync_state_bytes(path))
+
+
+def parse_sync_state(source: bytes) -> dict:
+    """Validate the exact bytes read at the start of the scan."""
     def unique_keys(pairs):
         result = {}
         for key, value in pairs:
@@ -405,8 +413,7 @@ def load_sync_state(path: Path) -> dict:
             result[key] = value
         return result
 
-    with path.open(encoding="utf-8") as source:
-        state = json.load(source, object_pairs_hook=unique_keys)
+    state = json.loads(source.decode("utf-8"), object_pairs_hook=unique_keys)
     tasks = state.get("tasks") if isinstance(state, dict) else None
     claims = {}
     if isinstance(tasks, dict):
