@@ -802,7 +802,9 @@ def register_tools(server: FastMCP):
     
     @server.tool()
     def sync_to_github(dry_run: bool = False, recover: bool = False,
-                       reviewed_item_ids: Optional[list[str]] = None) -> str:
+                       reviewed_item_ids: Optional[list[str]] = None,
+                       review_token: Optional[str] = None,
+                       confirmed_legacy_item_ids: Optional[list[str]] = None) -> str:
         """
         Sync the kanban board to GitHub Projects V2.
         
@@ -813,6 +815,8 @@ def register_tools(server: FastMCP):
                 return the recovery preview without writing.
             reviewed_item_ids: When applying recovery, acknowledge the unmarked
                 Project item IDs you checked against the planned creates.
+            review_token: The token from the recovery preview you checked.
+            confirmed_legacy_item_ids: Pending legacy IDs you verified belong to this board.
         
         Returns:
             Sync results or error message
@@ -840,8 +844,8 @@ def register_tools(server: FastMCP):
                 kanban_path=kanban_path,
             )
 
-        if reviewed_item_ids and (not recover or dry_run):
-            return _error(ERROR_CONFIGURATION, "Use reviewed_item_ids when applying recovery.")
+        if (reviewed_item_ids or confirmed_legacy_item_ids or review_token) and (not recover or dry_run):
+            return _error(ERROR_CONFIGURATION, "Use review options when applying recovery.")
         if dry_run and not recover:
             from sync_kanban import BoardReadError, ConfigurationError, local_sync_preview
 
@@ -875,6 +879,9 @@ def register_tools(server: FastMCP):
         if recover:
             cmd.append("--recover")
             cmd.extend(f"--reviewed-item={item_id}" for item_id in reviewed_item_ids or [])
+            cmd.extend(f"--confirm-legacy-item={item_id}" for item_id in confirmed_legacy_item_ids or [])
+            if review_token is not None:
+                cmd.append(f"--review-token={review_token}")
             if dry_run:
                 cmd.append("--dry-run")
 

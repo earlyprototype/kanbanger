@@ -41,7 +41,7 @@ def test_recover_in_github_project(tmp_path):
     try:
         # Every item in this snapshot predates the test board's first CREATE.
         initial = sync(recover=True, preview=True)
-        sync(recover=True, reviewed_item_ids=initial["unreviewed_item_ids"])
+        sync(recover=True, reviewed_item_ids=initial["unreviewed_item_ids"], review_token=initial["review_token"])
         sync()
         owned, = created
         sentinel = record_create(project, title, "Independent sandbox draft")

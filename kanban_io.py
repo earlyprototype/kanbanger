@@ -447,6 +447,9 @@ def _validate_sync_state(state):
         raise ValueError("invalid reviewed_unmarked_ids")
     if reviewed and not (board_key and state.get("project_id")):
         raise ValueError("reviewed item IDs require board and Project bindings")
+    titles = state.get("reviewed_create_titles", [])
+    if not isinstance(titles, list) or not all(isinstance(title, str) and title.strip() for title in titles):
+        raise ValueError("invalid reviewed_create_titles")
     version = state.get("schema_version", 0)
     if type(version) is not int or version < 0:
         raise ValueError("invalid schema_version")

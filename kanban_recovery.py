@@ -74,10 +74,11 @@ class Inventory:
     tasks: dict = field(default_factory=dict)
     archived: dict = field(default_factory=dict)
     legacy: dict = field(default_factory=dict)
+    pending_legacy: dict = field(default_factory=dict)
     unmarked: dict = field(default_factory=dict)
 
 
-def inspect_drafts(items, board_key, stored, local, *, recover):
+def inspect_drafts(items, board_key, stored, local, *, recover, sidecar_bound):
     """Check active and archived items before planning changes to the Project."""
     result = Inventory()
     by_id = {task["item_id"]: title for title, task in stored.items()}
@@ -94,19 +95,22 @@ def inspect_drafts(items, board_key, stored, local, *, recover):
         bound_id = None
         if marker:
             owner, title, bound_id = marker
+            if bound_id is not None and bound_id != item_id:
+                conflicts.append(f"marker for {bound_id} was copied to {item_id}")
+                continue
             if board_key is None:
                 conflicts.append(f"{item_id}: restore the board-id marker before syncing")
                 continue
             if owner != board_key:
                 if stored_title is not None:
                     conflicts.append(f"{item_id}: belongs to another board")
+                elif bound_id is None:
+                    conflicts.append(f"{item_id}: unbound marker for another board. "
+                                     "Verify the original item ID with that board's sidecar.")
                 continue
             if item.get("type") == "Issue":
                 conflicts.append(f"{item_id}: repository issue carries the marker for {title!r}. "
                                  "Resolve the converted draft before syncing")
-                continue
-            if bound_id is not None and bound_id != item_id:
-                conflicts.append(f"marker for {bound_id} was copied to {item_id}")
                 continue
             if stored_title is not None and title != stored_title:
                 conflicts.append(f"{item_id}: marker and sidecar name different tasks")
@@ -128,6 +132,8 @@ def inspect_drafts(items, board_key, stored, local, *, recover):
             result.unmarked[item_id] = item["title"]
             continue
 
+        if bound_id is None and not sidecar_bound:
+            result.pending_legacy[item_id] = title
         if item["archived"]:
             result.archived[item_id] = title
             seen.add(item_id)
@@ -145,7 +151,9 @@ def inspect_drafts(items, board_key, stored, local, *, recover):
             record["status"] = item["status"]
         if marker:
             record["marked"] = True
-        if recover and (title not in stored or title not in local):
+        if recover and (title not in stored or title not in local
+                        or local[title] != item["status"]
+                        or stored[title]["status"] != item["status"]):
             # Status and archive writes on recovered items require an operator.
             record["recovered"] = True
         result.tasks[title] = record

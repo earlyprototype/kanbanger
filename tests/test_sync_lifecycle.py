@@ -310,6 +310,7 @@ def test_sync_migrates_legacy_ids_and_executes_local_plan(tmp_path, monkeypatch)
     )
     state = StateManager(str(board_path))
     state.state.update(board_key="a" * 32, project_id="PVT_project",
+                       reviewed_create_titles=["New"],
                        reviewed_unmarked_ids=["unrelated-Moved", "unrelated-Removed"])
     state.state["tasks"] = {
         "Moved": {"item_id": "PVTI_moved", "status": "InProgress"},
@@ -471,6 +472,7 @@ def test_archive_failure_keeps_state_for_retry(tmp_path):
     board_path = tmp_path / "_kanban.md"
     board_path.write_text(KEYED_HEADER + "\n## TODO\n", encoding="utf-8")
     state = StateManager(str(board_path))
+    state.state["board_key"] = "a" * 32
     state.state["tasks"] = {
         "Removed": {"item_id": "PVTI_removed", "status": "Done"}
     }

@@ -7,6 +7,7 @@ import re
 import os
 import sys
 import json
+import hashlib
 import tempfile
 import argparse
 from contextlib import nullcontext
@@ -378,7 +379,7 @@ class StateManager:
             ) from exc
 
     def verify_board_key(self, board_key: Optional[str]) -> None:
-        """Pair legacy state with its board and refuse a changed or lost key."""
+        """Check the existing binding. An empty sidecar can adopt the board ID."""
         recorded = self.state.get("board_key")
         if recorded is not None and recorded != board_key:
             raise ConfigurationError(
@@ -386,7 +387,8 @@ class StateManager:
                 f"records {recorded}, but {self.kanban_file} carries {board_key}. "
                 "Restore the matching board file and its board-id marker."
             )
-        self.state["board_key"] = board_key
+        if not self.state["tasks"]:
+            self.state["board_key"] = board_key
 
     def get_item_id(self, task_title: str) -> Optional[str]:
         """Get the GitHub item ID for a task title."""
@@ -756,17 +758,22 @@ class Syncer:
     
     def sync(self, repo: str, project_number: Optional[int] = None, *,
              recover: bool = False, preview: bool = False,
-             reviewed_item_ids: Optional[List[str]] = None):
+             reviewed_item_ids: Optional[List[str]] = None, review_token: Optional[str] = None,
+             confirmed_legacy_item_ids: Optional[List[str]] = None):
         """Check ownership under the same workspace lock used for all writes."""
         if preview and not recover:
             raise ConfigurationError("Use --dry-run for a local preview")
-        if reviewed_item_ids and (not recover or preview):
-            raise ConfigurationError("Use --reviewed-item when applying --recover.")
+        if (reviewed_item_ids or confirmed_legacy_item_ids or review_token) and (not recover or preview):
+            raise ConfigurationError("Use review options when applying --recover.")
+        if (reviewed_item_ids or confirmed_legacy_item_ids) and not review_token:
+            raise ConfigurationError("Supply --review-token from --recover --dry-run with item IDs.")
         lock = nullcontext() if preview else kanban_lock(str(self.state.kanban_file.parent))
         with lock:
-            return self._sync(repo, project_number, recover, preview, reviewed_item_ids or [])
+            return self._sync(repo, project_number, recover, preview, reviewed_item_ids or [],
+                              review_token, set(confirmed_legacy_item_ids or []))
 
-    def _sync(self, repo, project_number, recover, preview, reviewed_item_ids):
+    def _sync(self, repo, project_number, recover, preview, reviewed_item_ids,
+              review_token, confirmed_legacy_ids):
         parts = repo.split('/')
         if len(parts) != 2 or not all(parts):
             raise ConfigurationError("GITHUB_REPO must be 'owner/repo'")
@@ -798,6 +805,7 @@ class Syncer:
             inventory = inspect_drafts(
                 self.client.get_project_items(project_id), board_key,
                 self.state.state["tasks"], local, recover=recover,
+                sidecar_bound=self.state.state.get("board_key") is not None,
             )
         except OwnershipConflict as exc:
             raise ConfigurationError(f"Ownership conflict: {exc}") from exc
@@ -813,7 +821,30 @@ class Syncer:
                 "Sync state needs recovery. Inspect --recover --dry-run, then run --recover."
             )
 
+        unknown_claims = confirmed_legacy_ids - inventory.pending_legacy.keys()
+        if unknown_claims:
+            raise ConfigurationError(f"IDs absent from legacy claims: {', '.join(sorted(unknown_claims))}")
+        pending = {item_id: title for item_id, title in inventory.pending_legacy.items()
+                   if item_id not in confirmed_legacy_ids}
+        if pending and board_key is not None and not preview:
+            raise ConfigurationError(
+                f"Legacy sidecar has no board-id binding for items {', '.join(pending)}. "
+                "Inspect --recover --dry-run and confirm each claim with --confirm-legacy-item "
+                "and --review-token, or restore the matching sidecar."
+            )
+        # Keep unconfirmed claims out of both the owned inventory and the plan.
+        for item_id, title in pending.items():
+            local.pop(title, None)
+            inventory.tasks.pop(title, None)
+            inventory.legacy.pop(title, None)
+            inventory.archived.pop(item_id, None)
         plan = build_sync_plan(local, inventory.tasks)
+        create_titles = sorted(op["title"] for op in plan["operations"] if op["action"] == "CREATE")
+        scope = [board_key, project_id, create_titles, inventory.pending_legacy]
+        current_token = hashlib.sha256(json.dumps(scope, sort_keys=True).encode("utf-8")).hexdigest()
+        if review_token is not None and review_token != current_token:
+            raise ConfigurationError("Review token does not match the current preview. "
+                                     "Inspect --recover --dry-run again.")
         # An intact backup can predate an unmarked card. Only an operator can
         # rule out a renamed legacy draft or converted issue before a CREATE.
         unknown_ids = set(reviewed_item_ids) - inventory.unmarked.keys()
@@ -822,17 +853,23 @@ class Syncer:
                 f"Reviewed IDs absent from the unmarked inventory: {', '.join(sorted(unknown_ids))}. "
                 "Inspect --recover --dry-run again."
             )
-        reviewed = inventory.unmarked.keys() & self.state.state.get("reviewed_unmarked_ids", [])
-        reviewed.update(reviewed_item_ids)
+        reviewed = set(reviewed_item_ids)
+        if self.state.state.get("reviewed_create_titles") == create_titles:
+            saved_ids = self.state.state.get("reviewed_unmarked_ids", [])
+            reviewed.update(inventory.unmarked.keys() & saved_ids)
         unreviewed = sorted(inventory.unmarked.keys() - reviewed)
         if not recover and plan["summary"]["create"] and unreviewed:
             raise ConfigurationError(
                 f"Review unmarked Project items before CREATE: {', '.join(unreviewed)}. "
-                "Inspect --recover --dry-run, then apply --recover with --reviewed-item ID "
-                "for each item you have checked."
+                "Inspect --recover --dry-run, then apply --recover with its --review-token "
+                "and --reviewed-item ID for each item you have checked."
             )
-        if reviewed or "reviewed_unmarked_ids" in self.state.state:
+        if reviewed:
             self.state.state["reviewed_unmarked_ids"] = sorted(reviewed)
+            self.state.state["reviewed_create_titles"] = create_titles
+        else:
+            self.state.state.pop("reviewed_unmarked_ids", None)
+            self.state.state.pop("reviewed_create_titles", None)
         self.state.state["tasks"] = inventory.tasks
         marker_guidance = (
             "Sync and recovery require a board-id marker to apply changes. "
@@ -847,6 +884,8 @@ class Syncer:
                 "archived": inventory.archived,
                 "unmarked": inventory.unmarked,
                 "unreviewed_item_ids": unreviewed,
+                "pending_legacy_claims": pending,
+                "review_token": current_token,
                 "mark_on_next_sync": {title: item["id"] for title, item in inventory.legacy.items()},
                 "plan": plan,
             }
@@ -860,6 +899,7 @@ class Syncer:
         self.board.verify_source()
         if board_key is None:
             raise ConfigurationError(marker_guidance)
+        self.state.state["board_key"] = board_key
         if recover:
             backup = self.state.save_unlocked(corrupt=state_kind == "corrupt")
             if backup is not None:
@@ -895,6 +935,10 @@ class Syncer:
                 # desynced from GH (state thinks status set; GH has none;
                 # next sync sees stored == desired and skips forever).
                 self.state.update_task(title, item_id, None)
+                # This CREATE consumes the reviewed plan. A retry with a
+                # different set of remaining creates needs its own review.
+                self.state.state.pop("reviewed_unmarked_ids", None)
+                self.state.state.pop("reviewed_create_titles", None)
                 self.state.save_after(action, title, item_id)
                 bound_marker = item_marker(board_key, title, item_id)
                 self.client.mark_draft(item_id, title, provisional, bound_marker)
@@ -1005,9 +1049,13 @@ def _main():
                         help='Rebuild sync state from marked drafts. Combine with --dry-run to preview.')
     parser.add_argument('--reviewed-item', action='append', metavar='ID',
                         help='With --recover, acknowledge an unmarked Project item by ID. Repeat for each item.')
+    parser.add_argument('--confirm-legacy-item', action='append', metavar='ID',
+                        help='With --recover, confirm this board owns the legacy sidecar claim for ID.')
+    parser.add_argument('--review-token', help='Use the token from the recovery preview for these item IDs.')
     args = parser.parse_args()
-    if args.reviewed_item and (not args.recover or args.dry_run):
-        raise ConfigurationError("Use --reviewed-item when applying --recover.")
+    review_options = args.reviewed_item or args.confirm_legacy_item or args.review_token
+    if review_options and (not args.recover or args.dry_run):
+        raise ConfigurationError("Use review options when applying --recover.")
     
     # Convert project number from env var
     if args.project and isinstance(args.project, str):
@@ -1035,7 +1083,8 @@ def _main():
     syncer = Syncer(LocalBoard(args.kanban_file), state, client)
     
     result = syncer.sync(args.repo, args.project, recover=args.recover, preview=args.dry_run,
-                         reviewed_item_ids=args.reviewed_item)
+                         reviewed_item_ids=args.reviewed_item, review_token=args.review_token,
+                         confirmed_legacy_item_ids=args.confirm_legacy_item)
     if args.recover:
         print(json.dumps(result))
 
