@@ -504,6 +504,27 @@ def test_conversion_refuses_missing_corrupt_or_untracked_state(
     assert list(kanban_workspace.glob(".kanban.json.corrupt-*")) == []
 
 
+@pytest.mark.parametrize("constant", [b"NaN", b"Infinity", b"-Infinity"])
+def test_conversion_refuses_non_json_constants(
+    kanban_workspace, registered_tools, project_graphql, constant
+):
+    registered_tools["add_task"]("New")
+    path = kanban_workspace / ".kanban.json"
+    original = (
+        b'{"schema_version":1,"repo_node_id":"R_repo","project_id":"PVT_project",'
+        b'"tasks":{"New":{"item_id":"PVTI_new","status":"Todo","extra":%s}}}'
+        % constant
+    )
+    path.write_bytes(original)
+
+    result = json.loads(convert_tracked_draft(kanban_workspace / "_kanban.md", "New"))
+
+    assert result["success"] is False
+    assert result["error_code"] == "configuration_error"
+    assert project_graphql == []
+    assert path.read_bytes() == original
+
+
 def test_conversion_refuses_an_item_tracked_by_two_titles(
     kanban_workspace, registered_tools, project_graphql
 ):

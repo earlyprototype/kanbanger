@@ -11,7 +11,7 @@ import shutil
 import argparse
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, NoReturn, Optional, Set, Tuple
 
 from kanban_io import (
     atomic_write_json,
@@ -227,6 +227,10 @@ def _unique_state_keys(pairs: list[tuple[str, object]]) -> dict:
     return record
 
 
+def _reject_non_json_constant(value: str) -> NoReturn:
+    raise ValueError(f"invalid JSON number: {value}")
+
+
 class StateManager:
     """Manages the .kanban.json sidecar file for state tracking."""
     
@@ -261,7 +265,9 @@ class StateManager:
             try:
                 with open(self.state_file, 'r', encoding='utf-8') as f:
                     loaded = json.load(
-                        f, object_pairs_hook=_unique_state_keys if read_only else None
+                        f,
+                        object_pairs_hook=_unique_state_keys if read_only else None,
+                        parse_constant=_reject_non_json_constant if read_only else None,
                     )
                 if not isinstance(loaded, dict):
                     raise ValueError("top-level JSON value is not an object")
